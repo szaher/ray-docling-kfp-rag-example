@@ -1,0 +1,21 @@
+---
+name: model_deployment
+description: >
+  Deploy a model on OpenShift AI using vLLM ServingRuntime via
+  KServe InferenceService.
+stability: experimental
+dependencies:
+  kubeflow:
+    - name: Pipelines
+      version: ">=2.15.2"
+  external_services:
+    - name: KServe
+      version: ">=0.11.0"
+    - name: vLLM ServingRuntime
+      version: ">=0.4.0"
+tags:
+  - deployment
+  - model_serving
+  - vllm
+  - kserve
+  - rag

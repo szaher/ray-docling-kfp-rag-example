@@ -1,0 +1,70 @@
+---
+# Custom SecurityContextConstraints for Milvus components (optional).
+#
+# In practice, this SCC is NOT required if you use the namespace's
+# assigned UID range in your pod security contexts (which is what
+# 04-milvus-instance.yaml does). The default restricted-v2 SCC is
+# sufficient.
+#
+# This file is kept as a fallback for cases where you need to run
+# containers with UIDs outside the namespace range. Apply it only
+# if restricted-v2 does not work for your setup.
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: milvus-scc
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegeEscalation: false
+allowPrivilegedContainer: false
+allowedCapabilities: []
+defaultAddCapabilities: []
+fsGroup:
+  type: RunAsAny
+groups: []
+readOnlyRootFilesystem: false
+requiredDropCapabilities:
+  - ALL
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - persistentVolumeClaim
+  - projected
+  - secret
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: milvus-scc-role
+rules:
+  - apiGroups:
+      - security.openshift.io
+    resources:
+      - securitycontextconstraints
+    resourceNames:
+      - milvus-scc
+    verbs:
+      - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: milvus-scc-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: milvus-scc-role
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: milvus

@@ -1,0 +1,24 @@
+---
+name: pdf_to_milvus
+description: >
+  Parse PDFs with Docling, chunk with HybridChunker, embed with
+  sentence-transformers, and ingest directly into Milvus. No
+  intermediate files — PVC is read-only.
+stability: experimental
+dependencies:
+  kubeflow:
+    - name: Pipelines
+      version: ">=2.15.2"
+  external_services:
+    - name: KubeRay Operator
+      version: ">=1.1.0"
+    - name: Milvus
+      version: ">=2.4.0"
+tags:
+  - data_processing
+  - pdf
+  - docling
+  - ray
+  - milvus
+  - embeddings
+  - rag

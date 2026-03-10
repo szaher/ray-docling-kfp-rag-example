@@ -1,0 +1,61 @@
+---
+# Attu — web-based GUI for Milvus (optional)
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: attu
+  namespace: milvus
+  labels:
+    app: attu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: attu
+  template:
+    metadata:
+      labels:
+        app: attu
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: attu
+          image: quay.io/rhoai-szaher/attu:v2.4
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          env:
+            - name: MILVUS_URL
+              value: "milvus-milvus.milvus.svc.cluster.local:19530"
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: attu
+  namespace: milvus
+  labels:
+    app: attu
+spec:
+  type: ClusterIP
+  selector:
+    app: attu
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP

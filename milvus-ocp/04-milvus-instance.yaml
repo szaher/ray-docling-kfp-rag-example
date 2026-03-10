@@ -1,0 +1,121 @@
+---
+# Secret that mirrors the MinIO credentials from the default namespace.
+# Milvus requires the secret to exist in its own namespace.
+# Update the values to match your existing minio-secret in the default namespace.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-secret
+  namespace: milvus
+  labels:
+    app: milvus
+stringData:
+  # These must match your existing MinIO credentials in the default namespace.
+  # See ../minio.yaml for the source of truth.
+  accesskey: szaher
+  secretkey: your-secure-password
+---
+apiVersion: milvus.io/v1beta1
+kind: Milvus
+metadata:
+  name: milvus
+  namespace: milvus
+  labels:
+    app: milvus
+spec:
+  mode: standalone
+
+  # Use Quay-mirrored images to avoid Docker Hub rate limits and OCP short-name issues.
+  # Mirror these images before applying:
+  #   podman pull --platform linux/amd64 docker.io/milvusdb/milvus:v2.6.11
+  #   podman tag docker.io/milvusdb/milvus:v2.6.11 quay.io/rhoai-szaher/milvus:v2.6.11
+  #   podman push quay.io/rhoai-szaher/milvus:v2.6.11
+  dependencies:
+    # Use the existing MinIO in the default namespace
+    storage:
+      external: true
+      type: MinIO
+      endpoint: minio-service.default.svc.cluster.local:9000
+      secretRef: minio-secret
+
+    # Use an in-cluster etcd managed by the operator
+    etcd:
+      inCluster:
+        deletionPolicy: Delete
+        pvcDeletion: true
+        values:
+          replicaCount: 1
+          auth:
+            rbac:
+              enabled: false
+          # Use Quay-mirrored etcd image.
+          # The bitnami chart has separate registry/repository fields —
+          # setting the full path in repository causes double-prefix.
+          image:
+            registry: quay.io
+            repository: rhoai-szaher/milvus-etcd
+            tag: 3.5.25-r1
+            pullPolicy: Always
+          persistence:
+            enabled: true
+            size: 10Gi
+          # OCP security fixes for etcd.
+          # Use the namespace UID range (1000960000/10000) instead of
+          # arbitrary UIDs to satisfy the restricted-v2 SCC.
+          podSecurityContext:
+            enabled: true
+            fsGroup: 1000960000
+            runAsUser: 1000960000
+            runAsNonRoot: true
+          containerSecurityContext:
+            enabled: true
+            runAsUser: 1000960000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+
+  components:
+    # Use Quay-mirrored Milvus image to avoid Docker Hub rate limits
+    image: quay.io/rhoai-szaher/milvus:v2.6.11
+    standalone:
+      replicas: 1
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+        requests:
+          cpu: 500m
+          memory: 1Gi
+      # OCP security fixes for Milvus standalone.
+      # Use the namespace UID range to satisfy restricted-v2 SCC.
+      podSecurityContext:
+        fsGroup: 1000960000
+        runAsUser: 1000960000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containerSecurityContext:
+        runAsUser: 1000960000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+
+    # Disable components not needed in standalone mode
+    proxy: {}
+    dataNode: {}
+    indexNode: {}
+    queryNode: {}
+
+  config:
+    minio:
+      bucketName: milvus-bucket
+      rootPath: milvus
+      useSSL: false
+    log:
+      level: info

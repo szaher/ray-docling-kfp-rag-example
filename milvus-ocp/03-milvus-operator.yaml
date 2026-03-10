@@ -1,0 +1,32 @@
+---
+# Milvus Operator deployment.
+#
+# The recommended approach is to install via Helm:
+#
+#   helm repo add milvus-operator https://zilliztech.github.io/milvus-operator/
+#   helm repo update
+#   helm install milvus-operator milvus-operator/milvus-operator \
+#     -n milvus-operator --create-namespace \
+#     --set image.repository=quay.io/rhoai-szaher/milvus-operator \
+#     --set operator.securityContext.runAsNonRoot=true \
+#     --set operator.securityContext.allowPrivilegeEscalation=false \
+#     --set operator.securityContext.capabilities.drop[0]=ALL \
+#     --set operator.securityContext.seccompProfile.type=RuntimeDefault
+#
+# OCP enforces short-name mode — all images MUST use fully qualified
+# registry names (e.g. quay.io/rhoai-szaher/milvus-operator instead of
+# milvusdb/milvus-operator), otherwise CRI-O will reject the pull.
+#
+# The operator Helm chart container name is "manager", not
+# "milvus-operator". Use this when patching images:
+#   oc -n milvus-operator set image deployment/milvus-operator \
+#     manager=quay.io/rhoai-szaher/milvus-operator:v1.3.6
+#
+# This file creates the operator namespace.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: milvus-operator
+  labels:
+    app.kubernetes.io/part-of: milvus

@@ -1,0 +1,42 @@
+---
+# Service to expose Milvus gRPC endpoint (created by operator, but
+# defined here for the Route).
+# The operator creates a service named <instance>-milvus, so this
+# Route targets that service.
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: milvus-grpc
+  namespace: milvus
+  labels:
+    app: milvus
+spec:
+  to:
+    kind: Service
+    name: milvus-milvus
+    weight: 100
+  port:
+    targetPort: 19530
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+# Route for the Milvus Attu web UI (optional — deploy Attu separately)
+# See 06-attu.yaml for the Attu deployment.
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: milvus-attu
+  namespace: milvus
+  labels:
+    app: attu
+spec:
+  to:
+    kind: Service
+    name: attu
+    weight: 100
+  port:
+    targetPort: 3000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
