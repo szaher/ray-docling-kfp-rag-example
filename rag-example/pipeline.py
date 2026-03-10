@@ -1,8 +1,10 @@
 """KFP Pipeline: RAG Document Processing.
 
 Orchestrates:
-1. PDF → Milvus (parse, chunk, embed, ingest — single step)
+1. PDF -> Milvus (parse, chunk, embed, ingest -- single step)
 2. Model deployment on OpenShift AI (vLLM)
+
+All components use in-cluster Kubernetes config -- no API URL or token needed.
 """
 
 from kfp import dsl
@@ -23,7 +25,7 @@ def rag_pipeline(
     pvc_name: str = "data-pvc",
     pvc_mount_path: str = "/mnt/data",
     namespace: str = "rag-example",
-    # PDF → Milvus
+    # PDF -> Milvus
     input_path: str = "input/pdfs",
     ray_image: str = "quay.io/rhoai-szaher/docling-ray:latest",
     num_workers: int = 2,
@@ -43,10 +45,8 @@ def rag_pipeline(
     # Model deployment
     model_name: str = "mistralai/Mistral-7B-Instruct-v0.3",
     gpu_count: int = 1,
-    api_url: str = "",
-    token: str = "",
 ):
-    # Step 1: Parse PDFs → chunk → embed → insert into Milvus
+    # Step 1: Parse PDFs -> chunk -> embed -> insert into Milvus
     ingest_task = pdf_to_milvus(
         pvc_name=pvc_name,
         pvc_mount_path=pvc_mount_path,
@@ -73,10 +73,7 @@ def rag_pipeline(
         model_name=model_name,
         namespace=namespace,
         gpu_count=gpu_count,
-        api_url=api_url,
-        token=token,
     )
-    # Model can deploy in parallel, but sequence for pipeline clarity
     deploy_task.after(ingest_task)
 
 

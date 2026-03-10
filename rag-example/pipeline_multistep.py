@@ -8,6 +8,7 @@ Orchestrates four reusable components:
 
 Intermediate chunks are stored in S3 (MinIO), not on the PVC.
 The PVC is mounted read-only for input PDFs.
+All components use in-cluster Kubernetes config — no API URL or token needed.
 """
 
 from kfp import dsl
@@ -30,8 +31,6 @@ def rag_multistep_pipeline(
     pvc_name: str = "data-pvc",
     pvc_mount_path: str = "/mnt/data",
     namespace: str = "rag-example",
-    api_url: str = "",
-    token: str = "",
     # S3 (MinIO)
     s3_endpoint: str = "http://minio-service.default.svc.cluster.local:9000",
     s3_bucket: str = "rag-chunks",
@@ -66,8 +65,6 @@ def rag_multistep_pipeline(
         model_name=embedding_model,
         namespace=namespace,
         serving_runtime_name=embedding_runtime,
-        api_url=api_url,
-        token=token,
     )
 
     # Step 2: Parse & chunk PDFs (runs in parallel with step 1)
@@ -114,8 +111,6 @@ def rag_multistep_pipeline(
         model_name=llm_model_name,
         namespace=namespace,
         gpu_count=gpu_count,
-        api_url=api_url,
-        token=token,
     )
     deploy_task.after(ingest_task)
 

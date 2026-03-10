@@ -6,6 +6,8 @@ KFP component that deploys a model on OpenShift AI using a KServe `InferenceServ
 
 This component creates or updates a KServe `InferenceService` CR in the specified namespace. It supports models from HuggingFace (pulled automatically) or from a PVC path. After creation, it polls the InferenceService status until the `Ready` condition is `True`, then returns the inference endpoint URL.
 
+Uses in-cluster Kubernetes config (service account token) — no explicit API URL or token required.
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
@@ -18,8 +20,6 @@ This component creates or updates a KServe `InferenceService` CR in the specifie
 | `min_replicas` | int | `1` | Minimum replicas |
 | `max_replicas` | int | `1` | Maximum replicas |
 | `gpu_count` | int | `1` | GPUs per replica (`nvidia.com/gpu` resource). Set to 0 to disable GPU requests |
-| `api_url` | str | `""` | OpenShift API URL |
-| `token` | str | `""` | OpenShift auth token (Bearer) |
 
 ## Returns
 
@@ -27,7 +27,7 @@ The inference endpoint URL with `/v1` suffix (e.g., `https://model-endpoint.apps
 
 ## How It Works
 
-1. **Connect** to the OpenShift API using the provided URL and token.
+1. **Connect** to the Kubernetes API using in-cluster service account config.
 
 2. **Build InferenceService spec** with:
    - `RawDeployment` mode (no Knative dependency)
@@ -45,10 +45,9 @@ The inference endpoint URL with `/v1` suffix (e.g., `https://model-endpoint.apps
 - **ServingRuntime CR** named `vllm-runtime` (or custom name) must exist in the target namespace. RHOAI typically pre-installs this.
 - **GPU nodes** available in the cluster (for vLLM model serving)
 - **HuggingFace access** if pulling gated models (configure `HF_TOKEN` in the ServingRuntime or namespace secrets)
+- The KFP pipeline service account must have permissions to create/patch InferenceService CRs in the target namespace.
 
 ## Usage
-
-### In a KFP pipeline
 
 ```python
 from components.model_deployment import model_deployment
@@ -59,8 +58,6 @@ def deploy_pipeline():
         model_name="mistralai/Mistral-7B-Instruct-v0.3",
         namespace="rag-example",
         gpu_count=1,
-        api_url="https://api.cluster.example.com:6443",
-        token="sha256~...",
     )
 ```
 

@@ -2,7 +2,6 @@
 # Name: rag-multi-step-pipeline
 # Description: Multi-step RAG pipeline: deploy embedding model, parse & chunk PDFs with Docling (output to S3), ingest into Milvus, and deploy an LLM.
 # Inputs:
-#    api_url: str [Default: '']
 #    chunk_max_tokens: int [Default: 256.0]
 #    collection_name: str [Default: 'rag_documents']
 #    cpus_per_actor: int [Default: 4.0]
@@ -27,7 +26,6 @@
 #    s3_endpoint: str [Default: 'http://minio-service.default.svc.cluster.local:9000']
 #    s3_prefix: str [Default: 'chunks']
 #    s3_secret_key: str [Default: '']
-#    token: str [Default: '']
 #    worker_cpus: int [Default: 8.0]
 #    worker_memory_gb: int [Default: 16.0]
 components:
@@ -35,11 +33,6 @@ components:
     executorLabel: exec-deploy-embedding-model
     inputDefinitions:
       parameters:
-        api_url:
-          defaultValue: ''
-          description: OpenShift API URL.
-          isOptional: true
-          parameterType: STRING
         cpu_limits:
           defaultValue: '4'
           description: CPU limits per replica.
@@ -79,11 +72,6 @@ components:
         serving_runtime_name:
           defaultValue: embedding-runtime
           description: Name of the embedding ServingRuntime CR.
-          isOptional: true
-          parameterType: STRING
-        token:
-          defaultValue: ''
-          description: OpenShift auth token.
           isOptional: true
           parameterType: STRING
     outputDefinitions:
@@ -164,11 +152,6 @@ components:
     executorLabel: exec-model-deployment
     inputDefinitions:
       parameters:
-        api_url:
-          defaultValue: ''
-          description: OpenShift API URL.
-          isOptional: true
-          parameterType: STRING
         gpu_count:
           defaultValue: 1.0
           description: Number of GPUs per replica.
@@ -204,11 +187,6 @@ components:
         serving_runtime_name:
           defaultValue: vllm-runtime
           description: Name of the ServingRuntime CR.
-          isOptional: true
-          parameterType: STRING
-        token:
-          defaultValue: ''
-          description: OpenShift auth token.
           isOptional: true
           parameterType: STRING
     outputDefinitions:
@@ -353,22 +331,18 @@ deploymentSpec:
           \ str,\n    serving_runtime_name: str = \"embedding-runtime\",\n    min_replicas:\
           \ int = 1,\n    max_replicas: int = 1,\n    cpu_requests: str = \"2\",\n\
           \    cpu_limits: str = \"4\",\n    memory_requests: str = \"4Gi\",\n   \
-          \ memory_limits: str = \"8Gi\",\n    api_url: str = \"\",\n    token: str\
-          \ = \"\",\n) -> str:\n    \"\"\"Deploy a text embedding model using KServe\
-          \ InferenceService.\n\n    Args:\n        model_name: HuggingFace model\
-          \ ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').\n        namespace:\
-          \ Namespace to deploy the InferenceService.\n        serving_runtime_name:\
+          \ memory_limits: str = \"8Gi\",\n) -> str:\n    \"\"\"Deploy a text embedding\
+          \ model using KServe InferenceService.\n\n    Args:\n        model_name:\
+          \ HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').\n\
+          \        namespace: Namespace to deploy the InferenceService.\n        serving_runtime_name:\
           \ Name of the embedding ServingRuntime CR.\n        min_replicas: Minimum\
           \ number of replicas.\n        max_replicas: Maximum number of replicas.\n\
           \        cpu_requests: CPU requests per replica.\n        cpu_limits: CPU\
           \ limits per replica.\n        memory_requests: Memory requests per replica.\n\
-          \        memory_limits: Memory limits per replica.\n        api_url: OpenShift\
-          \ API URL.\n        token: OpenShift auth token.\n\n    Returns:\n     \
-          \   The embedding service endpoint URL.\n    \"\"\"\n    import time\n\n\
-          \    from kubernetes import client as kclient\n\n    configuration = kclient.Configuration()\n\
-          \    configuration.host = api_url\n    configuration.verify_ssl = True\n\
-          \    configuration.api_key[\"authorization\"] = f\"Bearer {token}\"\n\n\
-          \    api_client = kclient.ApiClient(configuration)\n    custom_api = kclient.CustomObjectsApi(api_client)\n\
+          \        memory_limits: Memory limits per replica.\n\n    Returns:\n   \
+          \     The embedding service endpoint URL.\n    \"\"\"\n    import time\n\
+          \n    from kubernetes import client as kclient\n    from kubernetes import\
+          \ config\n\n    config.load_incluster_config()\n    custom_api = kclient.CustomObjectsApi()\n\
           \n    # Derive InferenceService name from model name\n    isvc_name = model_name.split(\"\
           /\")[-1].lower().replace(\"_\", \"-\").replace(\".\", \"-\")\n\n    isvc\
           \ = {\n        \"apiVersion\": \"serving.kserve.io/v1beta1\",\n        \"\
@@ -413,7 +387,7 @@ deploymentSpec:
           Embedding InferenceService ready: {url}\")\n            return url\n\n \
           \   raise TimeoutError(\n        f\"Embedding InferenceService '{isvc_name}'\
           \ did not become ready \"\n        \"within 15 minutes.\"\n    )\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
     exec-ingest-to-milvus:
       container:
         args:
@@ -533,7 +507,7 @@ deploymentSpec:
           \ = time.time() - start_time\n    print(f\"\\nIngestion complete: {total_inserted}\
           \ vectors in {wall_clock:.1f}s\")\n    print(f\"Collection stats: {stats}\"\
           )\n\n    return f\"{collection_name}:{total_inserted}\"\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
     exec-model-deployment:
       container:
         args:
@@ -564,22 +538,18 @@ deploymentSpec:
           \ *\n\ndef model_deployment(\n    model_name: str,\n    namespace: str,\n\
           \    runtime: str = \"vllm\",\n    model_path: str = \"\",\n    serving_runtime_name:\
           \ str = \"vllm-runtime\",\n    min_replicas: int = 1,\n    max_replicas:\
-          \ int = 1,\n    gpu_count: int = 1,\n    api_url: str = \"\",\n    token:\
-          \ str = \"\",\n) -> str:\n    \"\"\"Deploy a model on OpenShift AI using\
-          \ an InferenceService.\n\n    Args:\n        model_name: Name/path of the\
-          \ model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n        namespace:\
-          \ Namespace to deploy the InferenceService.\n        runtime: Serving runtime\
-          \ to use (default: vllm).\n        model_path: Optional PVC path to the\
-          \ model. If empty, the model is pulled from HuggingFace.\n        serving_runtime_name:\
-          \ Name of the ServingRuntime CR.\n        min_replicas: Minimum number of\
-          \ replicas.\n        max_replicas: Maximum number of replicas.\n       \
-          \ gpu_count: Number of GPUs per replica.\n        api_url: OpenShift API\
-          \ URL.\n        token: OpenShift auth token.\n\n    Returns:\n        The\
-          \ inference endpoint URL.\n    \"\"\"\n    import time\n\n    from kubernetes\
-          \ import client as kclient\n\n    configuration = kclient.Configuration()\n\
-          \    configuration.host = api_url\n    configuration.verify_ssl = True\n\
-          \    configuration.api_key[\"authorization\"] = f\"Bearer {token}\"\n\n\
-          \    api_client = kclient.ApiClient(configuration)\n    custom_api = kclient.CustomObjectsApi(api_client)\n\
+          \ int = 1,\n    gpu_count: int = 1,\n) -> str:\n    \"\"\"Deploy a model\
+          \ on OpenShift AI using an InferenceService.\n\n    Args:\n        model_name:\
+          \ Name/path of the model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n\
+          \        namespace: Namespace to deploy the InferenceService.\n        runtime:\
+          \ Serving runtime to use (default: vllm).\n        model_path: Optional\
+          \ PVC path to the model. If empty, the model is pulled from HuggingFace.\n\
+          \        serving_runtime_name: Name of the ServingRuntime CR.\n        min_replicas:\
+          \ Minimum number of replicas.\n        max_replicas: Maximum number of replicas.\n\
+          \        gpu_count: Number of GPUs per replica.\n\n    Returns:\n      \
+          \  The inference endpoint URL.\n    \"\"\"\n    import time\n\n    from\
+          \ kubernetes import client as kclient\n    from kubernetes import config\n\
+          \n    config.load_incluster_config()\n    custom_api = kclient.CustomObjectsApi()\n\
           \n    isvc_name = model_name.split(\"/\")[-1].lower().replace(\".\", \"\
           -\")\n\n    # Build the InferenceService spec\n    predictor_spec = {\n\
           \        \"minReplicas\": min_replicas,\n        \"maxReplicas\": max_replicas,\n\
@@ -625,7 +595,7 @@ deploymentSpec:
           InferenceService ready: {url}\")\n            return f\"{url}/v1\"\n\n \
           \   raise TimeoutError(\n        f\"InferenceService '{isvc_name}' did not\
           \ become ready within 30 minutes.\"\n    )\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
     exec-parse-and-chunk:
       container:
         args:
@@ -735,7 +705,7 @@ deploymentSpec:
           \        elif status == \"FAILED\":\n            raise RuntimeError(f\"\
           RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return\
           \ f\"s3://{s3_bucket}/{s3_prefix}\"\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
 pipelineInfo:
   description: 'Multi-step RAG pipeline: deploy embedding model, parse & chunk PDFs
     with Docling (output to S3), ingest into Milvus, and deploy an LLM.'
@@ -750,16 +720,12 @@ root:
           name: comp-deploy-embedding-model
         inputs:
           parameters:
-            api_url:
-              componentInputParameter: api_url
             model_name:
               componentInputParameter: embedding_model
             namespace:
               componentInputParameter: namespace
             serving_runtime_name:
               componentInputParameter: embedding_runtime
-            token:
-              componentInputParameter: token
         taskInfo:
           name: deploy-embedding-model
       ingest-to-milvus:
@@ -807,16 +773,12 @@ root:
         - ingest-to-milvus
         inputs:
           parameters:
-            api_url:
-              componentInputParameter: api_url
             gpu_count:
               componentInputParameter: gpu_count
             model_name:
               componentInputParameter: llm_model_name
             namespace:
               componentInputParameter: namespace
-            token:
-              componentInputParameter: token
         taskInfo:
           name: model-deployment
       parse-and-chunk:
@@ -868,10 +830,6 @@ root:
           name: parse-and-chunk
   inputDefinitions:
     parameters:
-      api_url:
-        defaultValue: ''
-        isOptional: true
-        parameterType: STRING
       chunk_max_tokens:
         defaultValue: 256.0
         isOptional: true
@@ -965,10 +923,6 @@ root:
         isOptional: true
         parameterType: STRING
       s3_secret_key:
-        defaultValue: ''
-        isOptional: true
-        parameterType: STRING
-      token:
         defaultValue: ''
         isOptional: true
         parameterType: STRING

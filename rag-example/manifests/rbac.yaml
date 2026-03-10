@@ -1,0 +1,81 @@
+---
+# RBAC for the KFP pipeline service account.
+#
+# Grants permissions to create/manage RayJobs, RayClusters, and
+# InferenceServices required by the pipeline components.
+#
+# Usage:
+#   # Check your pipeline service account name:
+#   oc get sa -n <namespace> | grep -E 'pipeline|dspa'
+#
+#   # Apply (adjust SA_NAME and NAMESPACE as needed):
+#   oc apply -f rbac.yaml
+#
+# On OpenShift AI (RHOAI) with Data Science Pipelines, the service
+# account is typically named "ds-pipeline-dspa" or similar.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-rag-role
+  namespace: rag-example
+rules:
+  # RayJob / RayCluster management (KubeRay)
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs", "rayclusters"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+
+  # InferenceService management (KServe)
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+
+  # ServingRuntime (read-only, to verify it exists)
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["servingruntimes"]
+    verbs: ["get", "list"]
+
+  # Pods — needed for monitoring RayJob worker pods
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+
+  # Events — for debugging
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-rag-rolebinding
+  namespace: rag-example
+subjects:
+  # Default Data Science Pipelines service account.
+  # Adjust this name to match your DSP installation:
+  #   oc get sa -n rag-example | grep -E 'pipeline|dspa'
+  - kind: ServiceAccount
+    name: ds-pipeline-dspa
+    namespace: rag-example
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipeline-rag-role
+
+---
+# If the parse_and_chunk component uses `oc patch` via subprocess
+# (which runs as the pod's SA), the SA also needs access to patch
+# RayJobs. This is already covered by the Role above.
+#
+# If RayJobs are created in a different namespace than the pipeline,
+# use a ClusterRole + ClusterRoleBinding instead, or add a separate
+# Role in the RayJob namespace.
+
+# Cross-namespace access: If Milvus is in a different namespace,
+# no RBAC is needed — Milvus access is via network (gRPC), not
+# the Kubernetes API.
+
+# Cross-namespace access: If MinIO is in a different namespace,
+# no RBAC is needed — MinIO access is via network (S3 API), not
+# the Kubernetes API.

@@ -2,13 +2,16 @@
 
 Creates a KServe InferenceService with a TEI-compatible ServingRuntime
 for serving embedding requests via an OpenAI-compatible API.
+
+Uses in-cluster Kubernetes config (service account token) — no
+explicit API URL or token required.
 """
 
 from kfp import dsl
 
 
 @dsl.component(
-    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523",
+    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-20250827",
     packages_to_install=["kubernetes>=28.1.0"],
 )
 def deploy_embedding_model(
@@ -21,8 +24,6 @@ def deploy_embedding_model(
     cpu_limits: str = "4",
     memory_requests: str = "4Gi",
     memory_limits: str = "8Gi",
-    api_url: str = "",
-    token: str = "",
 ) -> str:
     """Deploy a text embedding model using KServe InferenceService.
 
@@ -36,8 +37,6 @@ def deploy_embedding_model(
         cpu_limits: CPU limits per replica.
         memory_requests: Memory requests per replica.
         memory_limits: Memory limits per replica.
-        api_url: OpenShift API URL.
-        token: OpenShift auth token.
 
     Returns:
         The embedding service endpoint URL.
@@ -45,14 +44,10 @@ def deploy_embedding_model(
     import time
 
     from kubernetes import client as kclient
+    from kubernetes import config
 
-    configuration = kclient.Configuration()
-    configuration.host = api_url
-    configuration.verify_ssl = True
-    configuration.api_key["authorization"] = f"Bearer {token}"
-
-    api_client = kclient.ApiClient(configuration)
-    custom_api = kclient.CustomObjectsApi(api_client)
+    config.load_incluster_config()
+    custom_api = kclient.CustomObjectsApi()
 
     # Derive InferenceService name from model name
     isvc_name = model_name.split("/")[-1].lower().replace("_", "-").replace(".", "-")

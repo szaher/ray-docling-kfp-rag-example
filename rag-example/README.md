@@ -94,6 +94,8 @@ rag-example/
 +-- rag_pipeline.yaml              # Compiled single-step pipeline (import via UI)
 +-- rag_multistep_pipeline.yaml    # Compiled multi-step pipeline (import via UI)
 +-- rag-pipeline.ipynb             # Interactive notebook
++-- manifests/
+|   +-- rbac.yaml                  # RBAC for pipeline service account
 +-- README.md
 ```
 
@@ -127,6 +129,45 @@ The Ray worker image must have Docling pre-installed:
 
 ```
 quay.io/rhoai-szaher/docling-ray:latest
+```
+
+## Setup
+
+### 1. Apply RBAC
+
+The pipeline service account needs permissions to create RayJobs, InferenceServices, and related resources. Apply the RBAC manifests before running the pipeline:
+
+```bash
+# Check your pipeline service account name
+oc get sa -n rag-example | grep -E 'pipeline|dspa'
+
+# If needed, edit manifests/rbac.yaml to match your SA name
+# Default: ds-pipeline-dspa
+
+# Apply RBAC
+oc apply -f manifests/rbac.yaml
+```
+
+The Role grants:
+- `ray.io/rayjobs`, `ray.io/rayclusters` — create, get, patch, delete (for RayJob submission)
+- `serving.kserve.io/inferenceservices` — create, get, patch, delete (for model deployment)
+- `serving.kserve.io/servingruntimes` — get, list (to verify runtime exists)
+- `pods`, `pods/log`, `events` — get, list, watch (for monitoring)
+
+### 2. Verify prerequisites
+
+```bash
+# KubeRay operator running
+oc get pods -n ray-system
+
+# Milvus reachable
+oc exec -it <any-pod> -n rag-example -- curl -s http://milvus-milvus.milvus.svc.cluster.local:19530/v1/vector/collections
+
+# MinIO reachable
+oc exec -it <any-pod> -n rag-example -- curl -s http://minio-service.default.svc.cluster.local:9000/minio/health/live
+
+# PVC with PDFs exists
+oc get pvc data-pvc -n rag-example
 ```
 
 ## Quick Start

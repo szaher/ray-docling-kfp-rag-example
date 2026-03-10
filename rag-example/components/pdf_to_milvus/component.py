@@ -9,7 +9,7 @@ from kfp import dsl
 
 
 @dsl.component(
-    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523",
+    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-20250827",
     packages_to_install=[
         "codeflare-sdk>=0.25.0",
         "kubernetes>=28.1.0",

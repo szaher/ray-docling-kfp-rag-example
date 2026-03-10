@@ -2,7 +2,6 @@
 # Name: rag-document-processing-pipeline
 # Description: Process PDFs with Ray Data + Docling, ingest into Milvus, and deploy a model for RAG inference.
 # Inputs:
-#    api_url: str [Default: '']
 #    chunk_max_tokens: int [Default: 256.0]
 #    collection_name: str [Default: 'rag_documents']
 #    cpus_per_actor: int [Default: 4.0]
@@ -21,7 +20,6 @@
 #    pvc_mount_path: str [Default: '/mnt/data']
 #    pvc_name: str [Default: 'data-pvc']
 #    ray_image: str [Default: 'quay.io/rhoai-szaher/docling-ray:latest']
-#    token: str [Default: '']
 #    worker_cpus: int [Default: 8.0]
 #    worker_memory_gb: int [Default: 16.0]
 components:
@@ -29,11 +27,6 @@ components:
     executorLabel: exec-model-deployment
     inputDefinitions:
       parameters:
-        api_url:
-          defaultValue: ''
-          description: OpenShift API URL.
-          isOptional: true
-          parameterType: STRING
         gpu_count:
           defaultValue: 1.0
           description: Number of GPUs per replica.
@@ -69,11 +62,6 @@ components:
         serving_runtime_name:
           defaultValue: vllm-runtime
           description: Name of the ServingRuntime CR.
-          isOptional: true
-          parameterType: STRING
-        token:
-          defaultValue: ''
-          description: OpenShift auth token.
           isOptional: true
           parameterType: STRING
     outputDefinitions:
@@ -223,22 +211,18 @@ deploymentSpec:
           \ *\n\ndef model_deployment(\n    model_name: str,\n    namespace: str,\n\
           \    runtime: str = \"vllm\",\n    model_path: str = \"\",\n    serving_runtime_name:\
           \ str = \"vllm-runtime\",\n    min_replicas: int = 1,\n    max_replicas:\
-          \ int = 1,\n    gpu_count: int = 1,\n    api_url: str = \"\",\n    token:\
-          \ str = \"\",\n) -> str:\n    \"\"\"Deploy a model on OpenShift AI using\
-          \ an InferenceService.\n\n    Args:\n        model_name: Name/path of the\
-          \ model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n        namespace:\
-          \ Namespace to deploy the InferenceService.\n        runtime: Serving runtime\
-          \ to use (default: vllm).\n        model_path: Optional PVC path to the\
-          \ model. If empty, the model is pulled from HuggingFace.\n        serving_runtime_name:\
-          \ Name of the ServingRuntime CR.\n        min_replicas: Minimum number of\
-          \ replicas.\n        max_replicas: Maximum number of replicas.\n       \
-          \ gpu_count: Number of GPUs per replica.\n        api_url: OpenShift API\
-          \ URL.\n        token: OpenShift auth token.\n\n    Returns:\n        The\
-          \ inference endpoint URL.\n    \"\"\"\n    import time\n\n    from kubernetes\
-          \ import client as kclient\n\n    configuration = kclient.Configuration()\n\
-          \    configuration.host = api_url\n    configuration.verify_ssl = True\n\
-          \    configuration.api_key[\"authorization\"] = f\"Bearer {token}\"\n\n\
-          \    api_client = kclient.ApiClient(configuration)\n    custom_api = kclient.CustomObjectsApi(api_client)\n\
+          \ int = 1,\n    gpu_count: int = 1,\n) -> str:\n    \"\"\"Deploy a model\
+          \ on OpenShift AI using an InferenceService.\n\n    Args:\n        model_name:\
+          \ Name/path of the model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n\
+          \        namespace: Namespace to deploy the InferenceService.\n        runtime:\
+          \ Serving runtime to use (default: vllm).\n        model_path: Optional\
+          \ PVC path to the model. If empty, the model is pulled from HuggingFace.\n\
+          \        serving_runtime_name: Name of the ServingRuntime CR.\n        min_replicas:\
+          \ Minimum number of replicas.\n        max_replicas: Maximum number of replicas.\n\
+          \        gpu_count: Number of GPUs per replica.\n\n    Returns:\n      \
+          \  The inference endpoint URL.\n    \"\"\"\n    import time\n\n    from\
+          \ kubernetes import client as kclient\n    from kubernetes import config\n\
+          \n    config.load_incluster_config()\n    custom_api = kclient.CustomObjectsApi()\n\
           \n    isvc_name = model_name.split(\"/\")[-1].lower().replace(\".\", \"\
           -\")\n\n    # Build the InferenceService spec\n    predictor_spec = {\n\
           \        \"minReplicas\": min_replicas,\n        \"maxReplicas\": max_replicas,\n\
@@ -284,7 +268,7 @@ deploymentSpec:
           InferenceService ready: {url}\")\n            return f\"{url}/v1\"\n\n \
           \   raise TimeoutError(\n        f\"InferenceService '{isvc_name}' did not\
           \ become ready within 30 minutes.\"\n    )\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
     exec-pdf-to-milvus:
       container:
         args:
@@ -396,7 +380,7 @@ deploymentSpec:
           \        elif status == \"FAILED\":\n            raise RuntimeError(f\"\
           RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return\
           \ f\"{collection_name}\"\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
 pipelineInfo:
   description: Process PDFs with Ray Data + Docling, ingest into Milvus, and deploy
     a model for RAG inference.
@@ -413,16 +397,12 @@ root:
         - pdf-to-milvus
         inputs:
           parameters:
-            api_url:
-              componentInputParameter: api_url
             gpu_count:
               componentInputParameter: gpu_count
             model_name:
               componentInputParameter: model_name
             namespace:
               componentInputParameter: namespace
-            token:
-              componentInputParameter: token
         taskInfo:
           name: model-deployment
       pdf-to-milvus:
@@ -472,10 +452,6 @@ root:
           name: pdf-to-milvus
   inputDefinitions:
     parameters:
-      api_url:
-        defaultValue: ''
-        isOptional: true
-        parameterType: STRING
       chunk_max_tokens:
         defaultValue: 256.0
         isOptional: true
@@ -546,10 +522,6 @@ root:
         parameterType: STRING
       ray_image:
         defaultValue: quay.io/rhoai-szaher/docling-ray:latest
-        isOptional: true
-        parameterType: STRING
-      token:
-        defaultValue: ''
         isOptional: true
         parameterType: STRING
       worker_cpus:

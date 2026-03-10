@@ -9,7 +9,7 @@ from kfp import dsl
 
 
 @dsl.component(
-    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523",
+    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-20250827",
     packages_to_install=[
         "pymilvus>=2.4.0",
         "sentence-transformers>=2.2.0",
