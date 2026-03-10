@@ -1,0 +1,20 @@
+---
+name: parse_and_chunk
+description: >
+  Parse PDFs with Docling and chunk with HybridChunker using a
+  Ray Data actor pool. Writes JSONL chunk files to PVC.
+stability: experimental
+dependencies:
+  kubeflow:
+    - name: Pipelines
+      version: ">=2.15.2"
+  external_services:
+    - name: KubeRay Operator
+      version: ">=1.1.0"
+tags:
+  - data_processing
+  - pdf
+  - docling
+  - ray
+  - chunking
+  - rag

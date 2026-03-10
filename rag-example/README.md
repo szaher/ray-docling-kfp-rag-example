@@ -2,21 +2,57 @@
 
 End-to-end Retrieval-Augmented Generation (RAG) pipeline on OpenShift AI that processes PDF documents, ingests them into Milvus, deploys an LLM, and enables question-answering over the ingested content.
 
+## Pipelines
+
+This example provides **two pipeline variants**:
+
+### 1. Single-Step Pipeline (`pipeline.py` / `rag_pipeline.yaml`)
+
+All-in-one: parse, chunk, embed, and ingest into Milvus in a single RayJob. PVC is read-only. Best for simple deployments.
+
+```
+PDF (PVC) --> [RayJob: Docling + chunk + embed + Milvus insert] --> Deploy LLM
+```
+
+### 2. Multi-Step Pipeline (`pipeline_multistep.py` / `rag_multistep_pipeline.yaml`)
+
+Four reusable components with clear separation of concerns. Best for production use and component reuse across pipelines.
+
+```
+Step 1: Deploy Embedding Model (TEI InferenceService)
+                |                               |
+Step 2: Parse & Chunk PDFs -----(parallel)------+
+    (RayJob: Docling + HybridChunker -> JSONL on S3/MinIO)
+                |                               |
+Step 3: Ingest into Milvus  <----(both done)----+
+    (read chunks from S3, call embedding API, insert vectors)
+                |
+Step 4: Deploy LLM (vLLM InferenceService)
+```
+
+Steps 1 and 2 run in parallel. Step 3 waits for both. Step 4 runs after ingestion.
+
 ## Architecture
 
 ```
                     +-------------------+
                     |   PDF Documents   |
-                    |  (PVC, read-only) |
+                    |      (PVC)        |
                     +--------+----------+
                              |
+              +--------------+--------------+
+              |                             |
+    +---------v---------+         +---------v---------+
+    |  Deploy Embedding |         |  Parse & Chunk    |
+    |  Model (TEI)      |         |  (RayJob/Docling) |
+    |                   |         |  -> JSONL on S3   |
+    +---------+---------+         +---------+---------+
+              |                             |
+              +--------------+--------------+
+                             |
                     +--------v----------+
-                    |   RayJob (actors)  |
-                    |                   |
-                    |  Docling parse    |
-                    |  HybridChunker    |
-                    |  Embed (MiniLM)   |
-                    |  Insert -> Milvus |
+                    |  Ingest to Milvus |
+                    |  (embed + insert) |
                     +--------+----------+
                              |
                     +--------v----------+
@@ -24,49 +60,41 @@ End-to-end Retrieval-Augmented Generation (RAG) pipeline on OpenShift AI that pr
                     |  (vector store)   |
                     +--------+----------+
                              |
-         +-------------------+-------------------+
-         |                                       |
-+--------v----------+                   +--------v----------+
-|  Query embedding   |                   |   vLLM Model      |
-|  (MiniLM)          |                   |   (InferenceService)|
-+--------+-----------+                   +--------+----------+
-         |                                        |
-         +-------------------+--------------------+
+              +--------------+--------------+
+              |                             |
+    +---------v---------+         +---------v---------+
+    |  Query embedding  |         |   vLLM Model      |
+    |  (MiniLM / TEI)   |         |  (InferenceService)|
+    +---------+---------+         +---------+---------+
+              |                             |
+              +--------------+--------------+
                              |
                     +--------v----------+
                     |    RAG Answer      |
                     +-------------------+
 ```
 
-## How It Works
-
-1. **PDF Ingestion (pdf_to_milvus):** A RayJob distributes PDF processing across worker pods. Each actor runs Docling in a subprocess to parse PDFs, uses `HybridChunker` for structure-aware chunking (respects headings, paragraphs, tables), generates embeddings with `sentence-transformers/all-MiniLM-L6-v2`, and inserts directly into Milvus. No intermediate files are written — the PVC is mounted read-only.
-
-2. **Model Deployment (model_deployment):** Creates a KServe `InferenceService` with the vLLM serving runtime on OpenShift AI. The model (default: `mistralai/Mistral-7B-Instruct-v0.3`) is pulled from HuggingFace or loaded from a PVC.
-
-3. **RAG Query:** Embeds the user question, searches Milvus for the top-k most similar chunks (cosine similarity), builds a prompt with the retrieved context, and sends it to the vLLM endpoint for answer generation.
-
 ## Directory Structure
 
 ```
 rag-example/
 +-- components/
-|   +-- pdf_to_milvus/        # KFP component: PDF parse + chunk + embed + Milvus ingest
-|   |   +-- component.py
-|   |   +-- metadata.yaml
-|   |   +-- __init__.py
-|   |   +-- README.md
-|   +-- model_deployment/      # KFP component: Deploy model via KServe InferenceService
-|       +-- component.py
-|       +-- metadata.yaml
-|       +-- __init__.py
-|       +-- README.md
+|   +-- deploy_embedding_model/  # Deploy embedding model (TEI InferenceService)
+|   +-- parse_and_chunk/         # Parse PDFs + chunk (RayJob -> JSONL on S3)
+|   +-- ingest_to_milvus/       # Embed chunks + insert into Milvus
+|   +-- pdf_to_milvus/          # Single-step: parse + chunk + embed + insert
+|   +-- model_deployment/       # Deploy LLM (vLLM InferenceService)
 +-- scripts/
-|   +-- docling_milvus_process.py   # Ray Data entrypoint (runs inside RayJob)
-|   +-- rag_query.py                # Standalone RAG query CLI
-+-- pipeline.py                     # KFP pipeline definition (both steps)
-+-- rag-pipeline.ipynb              # Interactive notebook (full walkthrough)
-+-- README.md                       # This file
+|   +-- docling_chunk_process.py    # Ray entrypoint: parse + chunk -> S3
+|   +-- milvus_ingest.py           # Standalone: read S3, embed, insert into Milvus
+|   +-- docling_milvus_process.py  # Ray entrypoint: single-step (parse -> Milvus)
+|   +-- rag_query.py               # RAG query CLI
++-- pipeline.py                    # Single-step pipeline definition
++-- pipeline_multistep.py          # Multi-step pipeline definition
++-- rag_pipeline.yaml              # Compiled single-step pipeline (import via UI)
++-- rag_multistep_pipeline.yaml    # Compiled multi-step pipeline (import via UI)
++-- rag-pipeline.ipynb             # Interactive notebook
++-- README.md
 ```
 
 ## Prerequisites
@@ -76,9 +104,10 @@ rag-example/
 | OpenShift cluster | 4.14+ | With OpenShift AI (RHOAI) installed |
 | KubeRay Operator | >= 1.1.0 | Manages RayJob / RayCluster CRDs |
 | Milvus | >= 2.4.0 | See `../milvus-ocp/` for OCP deployment guide |
-| KServe | Included in RHOAI | For InferenceService / vLLM runtime |
+| MinIO / S3 | — | For intermediate chunk storage (multi-step pipeline) |
+| KServe | Included in RHOAI | For InferenceService / vLLM + TEI runtimes |
 | GPU nodes | 1+ NVIDIA GPU | For vLLM model serving |
-| PVC (ReadWriteMany) | — | Contains input PDFs at `<mount>/input/pdfs/` |
+| PVC (ReadOnlyMany or RWX) | — | Contains input PDFs at `<mount>/input/pdfs/` |
 | Python | 3.11+ | For running the notebook locally |
 
 ### Python packages (notebook host)
@@ -94,7 +123,7 @@ openai>=1.0.0
 
 ### Container image
 
-The Ray worker image must have Docling, sentence-transformers, and pymilvus pre-installed:
+The Ray worker image must have Docling pre-installed:
 
 ```
 quay.io/rhoai-szaher/docling-ray:latest
@@ -102,77 +131,73 @@ quay.io/rhoai-szaher/docling-ray:latest
 
 ## Quick Start
 
-### Option A: Interactive notebook
+### Import via KFP UI
 
-Open `rag-pipeline.ipynb` and follow Steps 1-10. The notebook covers everything from prerequisites verification to running a RAG query.
+Upload `rag_multistep_pipeline.yaml` (or `rag_pipeline.yaml` for single-step) directly to the Data Science Pipelines UI:
 
-### Option B: KFP pipeline
+1. Go to **Pipelines** > **Import pipeline**
+2. Upload the YAML file
+3. Configure parameters and create a run
+
+### Compile from source
 
 ```bash
-# Compile the pipeline
+# Multi-step pipeline
+python pipeline_multistep.py
+# Output: rag_multistep_pipeline.yaml
+
+# Single-step pipeline
 python pipeline.py
 # Output: rag_pipeline.yaml
-
-# Upload to Kubeflow Pipelines UI or submit via SDK
 ```
 
-### Option C: Standalone scripts
+### Standalone scripts
 
 ```bash
-# 1. Run the ingestion RayJob directly (configure via env vars)
-export MILVUS_HOST=milvus-milvus.milvus.svc.cluster.local
-export PVC_MOUNT_PATH=/mnt/data
-export INPUT_PATH=input/pdfs
-python scripts/docling_milvus_process.py
+# Parse & chunk (write JSONL to S3/MinIO)
+export PVC_MOUNT_PATH=/mnt/data INPUT_PATH=input/pdfs
+export S3_ENDPOINT=http://minio-service.default.svc.cluster.local:9000
+export S3_BUCKET=rag-chunks S3_ACCESS_KEY=minioadmin S3_SECRET_KEY=minioadmin
+python scripts/docling_chunk_process.py
 
-# 2. Query the RAG system
-export INFERENCE_URL=https://your-model-endpoint/v1
-export MODEL_NAME=mistralai/Mistral-7B-Instruct-v0.3
+# Ingest into Milvus (read chunks from S3)
+export MILVUS_HOST=milvus-milvus.milvus.svc.cluster.local
+export S3_ENDPOINT=http://minio-service.default.svc.cluster.local:9000
+export S3_BUCKET=rag-chunks S3_ACCESS_KEY=minioadmin S3_SECRET_KEY=minioadmin
+python scripts/milvus_ingest.py
+
+# RAG query
+export INFERENCE_URL=https://your-model-endpoint/v1 MODEL_NAME=mistralai/Mistral-7B-Instruct-v0.3
 python scripts/rag_query.py "What is the main topic of the documents?"
 ```
 
 ## Configuration
 
-### PDF Processing Parameters
+### Multi-Step Pipeline Defaults
 
 | Parameter | Default | Description |
 |---|---|---|
-| `pvc_name` | `data-pvc` | Name of the PVC containing input PDFs |
-| `pvc_mount_path` | `/mnt/data` | Mount path inside Ray pods |
-| `input_path` | `input/pdfs` | Relative path to PDFs under mount path |
-| `num_files` | `0` | Number of PDFs to process (0 = all) |
-| `chunk_max_tokens` | `256` | Max tokens per chunk (HybridChunker) |
-| `num_workers` | `2` | Number of Ray worker pods |
-| `worker_cpus` | `8` | CPUs per worker pod |
-| `worker_memory_gb` | `16` | Memory (GB) per worker pod |
-| `cpus_per_actor` | `4` | CPUs allocated per Docling actor |
-| `min_actors` | `2` | Minimum actor pool size |
-| `max_actors` | `4` | Maximum actor pool size |
-| `batch_size` | `4` | Files per batch sent to each actor |
-| `timeout_seconds` | `600` | Per-file processing timeout |
-
-### Milvus Parameters
-
-| Parameter | Default | Description |
-|---|---|---|
-| `milvus_host` | `milvus-milvus.milvus.svc.cluster.local` | Milvus gRPC service hostname |
-| `milvus_port` | `19530` | Milvus gRPC port |
-| `milvus_db` | `default` | Milvus database name |
-| `collection_name` | `rag_documents` | Milvus collection name |
+| `num_files` | `1000` | Number of PDFs to process (0 = all) |
+| `pvc_name` | `data-pvc` | PVC name |
+| `input_path` | `input/pdfs` | Input PDF path on PVC |
+| `s3_endpoint` | `http://minio-service.default.svc.cluster.local:9000` | S3/MinIO endpoint |
+| `s3_bucket` | `rag-chunks` | S3 bucket for intermediate chunks |
+| `s3_prefix` | `chunks` | S3 key prefix for chunk files |
 | `embedding_model` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
 | `embedding_dim` | `384` | Embedding vector dimension |
-
-### Model Deployment Parameters
-
-| Parameter | Default | Description |
-|---|---|---|
-| `model_name` | `mistralai/Mistral-7B-Instruct-v0.3` | HuggingFace model ID |
-| `gpu_count` | `1` | GPUs per replica |
-| `runtime` | `vllm` | Serving runtime |
+| `chunk_max_tokens` | `256` | Max tokens per chunk |
+| `num_workers` | `2` | Ray worker pods |
+| `worker_cpus` | `8` | CPUs per worker |
+| `worker_memory_gb` | `16` | Memory per worker |
+| `cpus_per_actor` | `4` | CPUs per Docling actor |
+| `min_actors` | `2` | Min actor pool size |
+| `max_actors` | `4` | Max actor pool size |
+| `milvus_host` | `milvus-milvus.milvus.svc.cluster.local` | Milvus hostname |
+| `collection_name` | `rag_documents` | Milvus collection |
+| `llm_model_name` | `mistralai/Mistral-7B-Instruct-v0.3` | LLM model |
+| `gpu_count` | `1` | GPUs for LLM |
 
 ## Milvus Collection Schema
-
-The pipeline creates a collection with the following schema:
 
 | Field | Type | Description |
 |---|---|---|
@@ -186,11 +211,14 @@ Index: `IVF_FLAT` with `COSINE` metric and `nlist=128`.
 
 ## Design Decisions
 
-- **No intermediate files:** The entire parse-chunk-embed-insert pipeline runs in memory. The PVC is mounted read-only, eliminating I/O bottleneck and storage overhead.
-- **Subprocess isolation:** Each Ray actor runs Docling in a separate subprocess. If a PDF causes a crash or hang, only the subprocess is affected — the actor restarts it and continues processing.
-- **HybridChunker over character splitting:** Docling's `HybridChunker` is structure-aware. It respects document structure (headings, paragraphs, tables, lists) rather than splitting on arbitrary character boundaries, producing higher-quality chunks for retrieval.
-- **Actor pool strategy:** Ray Data's `ActorPoolStrategy` with min/max sizing enables elastic scaling. Each actor maintains its own Docling converter, embedding model, and Milvus client, avoiding model reload overhead between files.
-- **Head node exclusion:** The RayJob patches `num-cpus=0` on the head node so that no actors are scheduled there, reserving it for coordination.
+- **Multi-step separation:** Each component has a single responsibility. The embedding model, PDF parsing, Milvus ingestion, and LLM deployment are independent, reusable components that can be mixed into different pipelines.
+- **Parallel execution:** Steps 1 (deploy embedding model) and 2 (parse & chunk) run in parallel since they have no dependencies on each other. Step 3 (ingest) waits for both.
+- **S3 intermediate storage:** Chunks are stored as JSONL in S3 (MinIO) between the parse and ingest steps. This avoids needing a ReadWriteMany PVC (which requires NFS/CephFS), provides a checkpoint if ingestion fails, and keeps the input PVC read-only.
+- **Flexible embedding:** The ingest component accepts an optional `embedding_endpoint`. When provided, it calls the deployed TEI service. When empty, it falls back to a local sentence-transformers model.
+- **Subprocess isolation:** Each Ray actor runs Docling in a separate subprocess for crash isolation and timeout handling.
+- **HybridChunker:** Structure-aware chunking that respects document structure (headings, paragraphs, tables) rather than splitting on arbitrary character boundaries.
+- **Head node exclusion:** RayJob patches `num-cpus=0` on the head node, reserving it for coordination.
+- **1000 PDF default:** The multi-step pipeline defaults to processing 1000 PDFs, a practical demo size.
 
 ## Troubleshooting
 
@@ -200,25 +228,29 @@ Check that the KubeRay operator is running and that the namespace has enough CPU
 
 ### Milvus connection refused
 
-Verify Milvus is running and reachable from the Ray pods:
+Verify Milvus is running and reachable:
 ```bash
-oc exec -it <ray-worker-pod> -n <namespace> -- python -c "
+oc exec -it <pod> -n <namespace> -- python -c "
 from pymilvus import MilvusClient
 c = MilvusClient(uri='http://milvus-milvus.milvus.svc.cluster.local:19530')
 print(c.list_collections())
 "
 ```
 
-### Model deployment timeout
+### Embedding service not ready
 
-The InferenceService waits up to 30 minutes. Check:
+Check the InferenceService status:
 ```bash
 oc get inferenceservice -n <namespace>
 oc describe inferenceservice <name> -n <namespace>
 ```
 
-Ensure the ServingRuntime CR (`vllm-runtime`) exists and GPU nodes are available.
+Ensure the embedding ServingRuntime CR exists in the namespace.
+
+### Model deployment timeout
+
+The LLM InferenceService waits up to 30 minutes. Ensure the ServingRuntime CR (`vllm-runtime`) exists and GPU nodes are available.
 
 ### Actors crashing with OOM
 
-Reduce `worker_memory_gb` or increase it, depending on PDF size. Large PDFs with many images can consume significant memory during Docling parsing. Consider also reducing `batch_size` to process fewer files per actor call.
+Increase `worker_memory_gb` or reduce `batch_size`. Large PDFs with many images consume significant memory during Docling parsing.

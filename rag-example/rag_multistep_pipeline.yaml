@@ -1,0 +1,984 @@
+# PIPELINE DEFINITION
+# Name: rag-multi-step-pipeline
+# Description: Multi-step RAG pipeline: deploy embedding model, parse & chunk PDFs with Docling (output to S3), ingest into Milvus, and deploy an LLM.
+# Inputs:
+#    api_url: str [Default: '']
+#    chunk_max_tokens: int [Default: 256.0]
+#    collection_name: str [Default: 'rag_documents']
+#    cpus_per_actor: int [Default: 4.0]
+#    embedding_dim: int [Default: 384.0]
+#    embedding_model: str [Default: 'sentence-transformers/all-MiniLM-L6-v2']
+#    embedding_runtime: str [Default: 'embedding-runtime']
+#    gpu_count: int [Default: 1.0]
+#    input_path: str [Default: 'input/pdfs']
+#    llm_model_name: str [Default: 'mistralai/Mistral-7B-Instruct-v0.3']
+#    max_actors: int [Default: 4.0]
+#    milvus_host: str [Default: 'milvus-milvus.milvus.svc.cluster.local']
+#    milvus_port: int [Default: 19530.0]
+#    min_actors: int [Default: 2.0]
+#    namespace: str [Default: 'rag-example']
+#    num_files: int [Default: 1000.0]
+#    num_workers: int [Default: 2.0]
+#    pvc_mount_path: str [Default: '/mnt/data']
+#    pvc_name: str [Default: 'data-pvc']
+#    ray_image: str [Default: 'quay.io/rhoai-szaher/docling-ray:latest']
+#    s3_access_key: str [Default: '']
+#    s3_bucket: str [Default: 'rag-chunks']
+#    s3_endpoint: str [Default: 'http://minio-service.default.svc.cluster.local:9000']
+#    s3_prefix: str [Default: 'chunks']
+#    s3_secret_key: str [Default: '']
+#    token: str [Default: '']
+#    worker_cpus: int [Default: 8.0]
+#    worker_memory_gb: int [Default: 16.0]
+components:
+  comp-deploy-embedding-model:
+    executorLabel: exec-deploy-embedding-model
+    inputDefinitions:
+      parameters:
+        api_url:
+          defaultValue: ''
+          description: OpenShift API URL.
+          isOptional: true
+          parameterType: STRING
+        cpu_limits:
+          defaultValue: '4'
+          description: CPU limits per replica.
+          isOptional: true
+          parameterType: STRING
+        cpu_requests:
+          defaultValue: '2'
+          description: CPU requests per replica.
+          isOptional: true
+          parameterType: STRING
+        max_replicas:
+          defaultValue: 1.0
+          description: Maximum number of replicas.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        memory_limits:
+          defaultValue: 8Gi
+          description: Memory limits per replica.
+          isOptional: true
+          parameterType: STRING
+        memory_requests:
+          defaultValue: 4Gi
+          description: Memory requests per replica.
+          isOptional: true
+          parameterType: STRING
+        min_replicas:
+          defaultValue: 1.0
+          description: Minimum number of replicas.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        model_name:
+          description: HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').
+          parameterType: STRING
+        namespace:
+          description: Namespace to deploy the InferenceService.
+          parameterType: STRING
+        serving_runtime_name:
+          defaultValue: embedding-runtime
+          description: Name of the embedding ServingRuntime CR.
+          isOptional: true
+          parameterType: STRING
+        token:
+          defaultValue: ''
+          description: OpenShift auth token.
+          isOptional: true
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-ingest-to-milvus:
+    executorLabel: exec-ingest-to-milvus
+    inputDefinitions:
+      parameters:
+        collection_name:
+          defaultValue: rag_documents
+          description: Milvus collection name.
+          isOptional: true
+          parameterType: STRING
+        embed_batch_size:
+          defaultValue: 64.0
+          description: Batch size for embedding requests.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        embedding_dim:
+          defaultValue: 384.0
+          description: Dimension of the embedding vectors.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        embedding_endpoint:
+          defaultValue: ''
+          description: 'Optional embedding service URL. If empty,
+
+            uses a local sentence-transformers model.'
+          isOptional: true
+          parameterType: STRING
+        embedding_model:
+          defaultValue: sentence-transformers/all-MiniLM-L6-v2
+          description: Embedding model name (for API or local).
+          isOptional: true
+          parameterType: STRING
+        milvus_batch_size:
+          defaultValue: 256.0
+          description: Batch size for Milvus inserts.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        milvus_db:
+          defaultValue: default
+          description: Milvus database name.
+          isOptional: true
+          parameterType: STRING
+        milvus_host:
+          description: Milvus service hostname.
+          parameterType: STRING
+        milvus_port:
+          defaultValue: 19530.0
+          description: Milvus gRPC port.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        s3_access_key:
+          description: S3 access key.
+          parameterType: STRING
+        s3_bucket:
+          description: S3 bucket containing chunk files.
+          parameterType: STRING
+        s3_endpoint:
+          description: S3-compatible endpoint URL (e.g. MinIO).
+          parameterType: STRING
+        s3_prefix:
+          defaultValue: chunks
+          description: Key prefix for chunk files in S3.
+          isOptional: true
+          parameterType: STRING
+        s3_secret_key:
+          description: S3 secret key.
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-model-deployment:
+    executorLabel: exec-model-deployment
+    inputDefinitions:
+      parameters:
+        api_url:
+          defaultValue: ''
+          description: OpenShift API URL.
+          isOptional: true
+          parameterType: STRING
+        gpu_count:
+          defaultValue: 1.0
+          description: Number of GPUs per replica.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        max_replicas:
+          defaultValue: 1.0
+          description: Maximum number of replicas.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        min_replicas:
+          defaultValue: 1.0
+          description: Minimum number of replicas.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        model_name:
+          description: Name/path of the model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').
+          parameterType: STRING
+        model_path:
+          defaultValue: ''
+          description: Optional PVC path to the model. If empty, the model is pulled
+            from HuggingFace.
+          isOptional: true
+          parameterType: STRING
+        namespace:
+          description: Namespace to deploy the InferenceService.
+          parameterType: STRING
+        runtime:
+          defaultValue: vllm
+          description: 'Serving runtime to use (default: vllm).'
+          isOptional: true
+          parameterType: STRING
+        serving_runtime_name:
+          defaultValue: vllm-runtime
+          description: Name of the ServingRuntime CR.
+          isOptional: true
+          parameterType: STRING
+        token:
+          defaultValue: ''
+          description: OpenShift auth token.
+          isOptional: true
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-parse-and-chunk:
+    executorLabel: exec-parse-and-chunk
+    inputDefinitions:
+      parameters:
+        batch_size:
+          defaultValue: 4.0
+          description: Files per batch sent to each actor.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        chunk_max_tokens:
+          defaultValue: 256.0
+          description: Max tokens per chunk (HybridChunker).
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        cpus_per_actor:
+          defaultValue: 4.0
+          description: CPUs per Docling processing actor.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        head_cpus:
+          defaultValue: 2.0
+          description: CPUs for the Ray head pod.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        head_memory_gb:
+          defaultValue: 4.0
+          description: Memory (GB) for the Ray head pod.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        input_path:
+          description: Relative path to input PDFs under the PVC.
+          parameterType: STRING
+        max_actors:
+          defaultValue: 4.0
+          description: Maximum actor pool size.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        min_actors:
+          defaultValue: 2.0
+          description: Minimum actor pool size.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        namespace:
+          description: OpenShift namespace for the RayJob.
+          parameterType: STRING
+        num_files:
+          defaultValue: 0.0
+          description: Number of PDFs to process (0 = all).
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        num_workers:
+          defaultValue: 2.0
+          description: Number of Ray worker pods.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        pvc_mount_path:
+          description: Mount path for the PVC inside pods.
+          parameterType: STRING
+        pvc_name:
+          description: Name of the PVC with input PDFs.
+          parameterType: STRING
+        ray_image:
+          description: Container image with Ray + Docling pre-installed.
+          parameterType: STRING
+        s3_access_key:
+          description: S3 access key.
+          parameterType: STRING
+        s3_bucket:
+          description: S3 bucket for output chunks.
+          parameterType: STRING
+        s3_endpoint:
+          description: S3-compatible endpoint URL (e.g. MinIO).
+          parameterType: STRING
+        s3_prefix:
+          defaultValue: chunks
+          description: Key prefix for chunk files in S3.
+          isOptional: true
+          parameterType: STRING
+        s3_secret_key:
+          description: S3 secret key.
+          parameterType: STRING
+        timeout_seconds:
+          defaultValue: 600.0
+          description: Per-file processing timeout.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        tokenizer:
+          defaultValue: sentence-transformers/all-MiniLM-L6-v2
+          description: Tokenizer for HybridChunker (usually the embedding model name).
+          isOptional: true
+          parameterType: STRING
+        worker_cpus:
+          defaultValue: 8.0
+          description: CPUs per worker pod.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        worker_memory_gb:
+          defaultValue: 16.0
+          description: Memory (GB) per worker pod.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-deploy-embedding-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_embedding_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes>=28.1.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_embedding_model(\n    model_name: str,\n    namespace:\
+          \ str,\n    serving_runtime_name: str = \"embedding-runtime\",\n    min_replicas:\
+          \ int = 1,\n    max_replicas: int = 1,\n    cpu_requests: str = \"2\",\n\
+          \    cpu_limits: str = \"4\",\n    memory_requests: str = \"4Gi\",\n   \
+          \ memory_limits: str = \"8Gi\",\n    api_url: str = \"\",\n    token: str\
+          \ = \"\",\n) -> str:\n    \"\"\"Deploy a text embedding model using KServe\
+          \ InferenceService.\n\n    Args:\n        model_name: HuggingFace model\
+          \ ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').\n        namespace:\
+          \ Namespace to deploy the InferenceService.\n        serving_runtime_name:\
+          \ Name of the embedding ServingRuntime CR.\n        min_replicas: Minimum\
+          \ number of replicas.\n        max_replicas: Maximum number of replicas.\n\
+          \        cpu_requests: CPU requests per replica.\n        cpu_limits: CPU\
+          \ limits per replica.\n        memory_requests: Memory requests per replica.\n\
+          \        memory_limits: Memory limits per replica.\n        api_url: OpenShift\
+          \ API URL.\n        token: OpenShift auth token.\n\n    Returns:\n     \
+          \   The embedding service endpoint URL.\n    \"\"\"\n    import time\n\n\
+          \    from kubernetes import client as kclient\n\n    configuration = kclient.Configuration()\n\
+          \    configuration.host = api_url\n    configuration.verify_ssl = True\n\
+          \    configuration.api_key[\"authorization\"] = f\"Bearer {token}\"\n\n\
+          \    api_client = kclient.ApiClient(configuration)\n    custom_api = kclient.CustomObjectsApi(api_client)\n\
+          \n    # Derive InferenceService name from model name\n    isvc_name = model_name.split(\"\
+          /\")[-1].lower().replace(\"_\", \"-\").replace(\".\", \"-\")\n\n    isvc\
+          \ = {\n        \"apiVersion\": \"serving.kserve.io/v1beta1\",\n        \"\
+          kind\": \"InferenceService\",\n        \"metadata\": {\n            \"name\"\
+          : isvc_name,\n            \"namespace\": namespace,\n            \"annotations\"\
+          : {\n                \"serving.kserve.io/deploymentMode\": \"RawDeployment\"\
+          ,\n            },\n        },\n        \"spec\": {\n            \"predictor\"\
+          : {\n                \"minReplicas\": min_replicas,\n                \"\
+          maxReplicas\": max_replicas,\n                \"model\": {\n           \
+          \         \"modelFormat\": {\"name\": \"embedding\"},\n                \
+          \    \"runtime\": serving_runtime_name,\n                    \"storageUri\"\
+          : f\"hf://{model_name}\",\n                    \"resources\": {\n      \
+          \                  \"requests\": {\n                            \"cpu\"\
+          : cpu_requests,\n                            \"memory\": memory_requests,\n\
+          \                        },\n                        \"limits\": {\n   \
+          \                         \"cpu\": cpu_limits,\n                       \
+          \     \"memory\": memory_limits,\n                        },\n         \
+          \           },\n                },\n            },\n        },\n    }\n\n\
+          \    # Create or update\n    try:\n        custom_api.get_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        custom_api.patch_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n            body=isvc,\n        )\n    \
+          \    print(f\"InferenceService '{isvc_name}' updated.\")\n    except kclient.rest.ApiException\
+          \ as e:\n        if e.status == 404:\n            custom_api.create_namespaced_custom_object(\n\
+          \                group=\"serving.kserve.io\",\n                version=\"\
+          v1beta1\",\n                namespace=namespace,\n                plural=\"\
+          inferenceservices\",\n                body=isvc,\n            )\n      \
+          \      print(f\"InferenceService '{isvc_name}' created.\")\n        else:\n\
+          \            raise\n\n    # Wait for Ready\n    print(\"Waiting for embedding\
+          \ InferenceService to become ready...\")\n    for _ in range(60):\n    \
+          \    time.sleep(15)\n        obj = custom_api.get_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        conditions = obj.get(\"\
+          status\", {}).get(\"conditions\", [])\n        ready = any(\n          \
+          \  c.get(\"type\") == \"Ready\" and c.get(\"status\") == \"True\"\n    \
+          \        for c in conditions\n        )\n        if ready:\n           \
+          \ url = obj.get(\"status\", {}).get(\"url\", \"\")\n            print(f\"\
+          Embedding InferenceService ready: {url}\")\n            return url\n\n \
+          \   raise TimeoutError(\n        f\"Embedding InferenceService '{isvc_name}'\
+          \ did not become ready \"\n        \"within 15 minutes.\"\n    )\n\n"
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+    exec-ingest-to-milvus:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - ingest_to_milvus
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pymilvus>=2.4.0'\
+          \ 'sentence-transformers>=2.2.0' 'requests>=2.28.0' 'boto3>=1.28.0'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef ingest_to_milvus(\n    s3_endpoint: str,\n    s3_bucket: str,\n\
+          \    s3_access_key: str,\n    s3_secret_key: str,\n    milvus_host: str,\n\
+          \    s3_prefix: str = \"chunks\",\n    embedding_endpoint: str = \"\",\n\
+          \    embedding_model: str = \"sentence-transformers/all-MiniLM-L6-v2\",\n\
+          \    embedding_dim: int = 384,\n    milvus_port: int = 19530,\n    milvus_db:\
+          \ str = \"default\",\n    collection_name: str = \"rag_documents\",\n  \
+          \  embed_batch_size: int = 64,\n    milvus_batch_size: int = 256,\n) ->\
+          \ str:\n    \"\"\"Read chunks from S3, embed, and insert into Milvus.\n\n\
+          \    Args:\n        s3_endpoint: S3-compatible endpoint URL (e.g. MinIO).\n\
+          \        s3_bucket: S3 bucket containing chunk files.\n        s3_access_key:\
+          \ S3 access key.\n        s3_secret_key: S3 secret key.\n        milvus_host:\
+          \ Milvus service hostname.\n        s3_prefix: Key prefix for chunk files\
+          \ in S3.\n        embedding_endpoint: Optional embedding service URL. If\
+          \ empty,\n            uses a local sentence-transformers model.\n      \
+          \  embedding_model: Embedding model name (for API or local).\n        embedding_dim:\
+          \ Dimension of the embedding vectors.\n        milvus_port: Milvus gRPC\
+          \ port.\n        milvus_db: Milvus database name.\n        collection_name:\
+          \ Milvus collection name.\n        embed_batch_size: Batch size for embedding\
+          \ requests.\n        milvus_batch_size: Batch size for Milvus inserts.\n\
+          \n    Returns:\n        The Milvus collection name and total vectors inserted.\n\
+          \    \"\"\"\n    import json\n    import time\n\n    import boto3\n    import\
+          \ requests as req_lib\n    from pymilvus import CollectionSchema, DataType,\
+          \ FieldSchema, MilvusClient\n\n    # --- Read chunks from S3 ---\n    s3\
+          \ = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
+          \        region_name=\"us-east-1\",\n    )\n\n    all_chunks = []\n    file_count\
+          \ = 0\n    paginator = s3.get_paginator(\"list_objects_v2\")\n    for page\
+          \ in paginator.paginate(Bucket=s3_bucket, Prefix=s3_prefix + \"/\"):\n \
+          \       for obj in page.get(\"Contents\", []):\n            key = obj[\"\
+          Key\"]\n            if not key.endswith(\".jsonl\"):\n                continue\n\
+          \            resp = s3.get_object(Bucket=s3_bucket, Key=key)\n         \
+          \   body = resp[\"Body\"].read().decode(\"utf-8\")\n            for line\
+          \ in body.strip().split(\"\\n\"):\n                if line:\n          \
+          \          all_chunks.append(json.loads(line))\n            file_count +=\
+          \ 1\n\n    print(f\"Read {len(all_chunks)} chunks from {file_count} JSONL\
+          \ files \"\n          f\"in s3://{s3_bucket}/{s3_prefix}/\")\n\n    if not\
+          \ all_chunks:\n        raise FileNotFoundError(\n            f\"No chunks\
+          \ found in s3://{s3_bucket}/{s3_prefix}/\"\n        )\n\n    # --- Setup\
+          \ Milvus collection ---\n    uri = f\"http://{milvus_host}:{milvus_port}\"\
+          \n    client = MilvusClient(uri=uri, db_name=milvus_db)\n\n    if client.has_collection(collection_name):\n\
+          \        print(f\"Dropping existing collection '{collection_name}'\")\n\
+          \        client.drop_collection(collection_name)\n\n    schema = CollectionSchema(\n\
+          \        fields=[\n            FieldSchema(\n                name=\"id\"\
+          , dtype=DataType.INT64, is_primary=True, auto_id=True\n            ),\n\
+          \            FieldSchema(\n                name=\"source_file\", dtype=DataType.VARCHAR,\
+          \ max_length=512\n            ),\n            FieldSchema(name=\"chunk_index\"\
+          , dtype=DataType.INT64),\n            FieldSchema(name=\"text\", dtype=DataType.VARCHAR,\
+          \ max_length=8192),\n            FieldSchema(\n                name=\"embedding\"\
+          ,\n                dtype=DataType.FLOAT_VECTOR,\n                dim=embedding_dim,\n\
+          \            ),\n        ],\n        description=\"RAG document chunks with\
+          \ embeddings\",\n    )\n    client.create_collection(collection_name=collection_name,\
+          \ schema=schema)\n\n    index_params = client.prepare_index_params()\n \
+          \   index_params.add_index(\n        field_name=\"embedding\",\n       \
+          \ index_type=\"IVF_FLAT\",\n        metric_type=\"COSINE\",\n        params={\"\
+          nlist\": 128},\n    )\n    client.create_index(\n        collection_name=collection_name,\
+          \ index_params=index_params\n    )\n    print(f\"Collection '{collection_name}'\
+          \ created (dim={embedding_dim}).\")\n\n    # --- Setup embedding ---\n \
+          \   use_endpoint = bool(embedding_endpoint)\n    local_model = None\n\n\
+          \    if use_endpoint:\n        print(f\"Using embedding endpoint: {embedding_endpoint}\"\
+          )\n    else:\n        print(f\"Using local embedding model: {embedding_model}\"\
+          )\n        from sentence_transformers import SentenceTransformer\n\n   \
+          \     local_model = SentenceTransformer(embedding_model)\n\n    # --- Embed\
+          \ and insert ---\n    start_time = time.time()\n    total_inserted = 0\n\
+          \n    for i in range(0, len(all_chunks), milvus_batch_size):\n        batch\
+          \ = all_chunks[i : i + milvus_batch_size]\n        texts = [c[\"text\"]\
+          \ for c in batch]\n\n        # Generate embeddings\n        if use_endpoint:\n\
+          \            all_embeddings = []\n            for j in range(0, len(texts),\
+          \ embed_batch_size):\n                embed_batch = texts[j : j + embed_batch_size]\n\
+          \                resp = req_lib.post(\n                    f\"{embedding_endpoint}/v1/embeddings\"\
+          ,\n                    json={\"model\": embedding_model, \"input\": embed_batch},\n\
+          \                    timeout=120,\n                )\n                resp.raise_for_status()\n\
+          \                data = resp.json()[\"data\"]\n                data.sort(key=lambda\
+          \ x: x[\"index\"])\n                all_embeddings.extend([d[\"embedding\"\
+          ] for d in data])\n            embeddings = all_embeddings\n        else:\n\
+          \            embeddings = local_model.encode(\n                texts,\n\
+          \                normalize_embeddings=True,\n                show_progress_bar=False,\n\
+          \                batch_size=embed_batch_size,\n            ).tolist()\n\n\
+          \        # Insert into Milvus\n        data = [\n            {\n       \
+          \         \"source_file\": c[\"source_file\"],\n                \"chunk_index\"\
+          : c[\"chunk_index\"],\n                \"text\": c[\"text\"],\n        \
+          \        \"embedding\": emb,\n            }\n            for c, emb in zip(batch,\
+          \ embeddings)\n        ]\n        client.insert(collection_name=collection_name,\
+          \ data=data)\n        total_inserted += len(data)\n\n        if (i // milvus_batch_size)\
+          \ % 10 == 0:\n            elapsed = time.time() - start_time\n         \
+          \   print(\n                f\"  Inserted {total_inserted}/{len(all_chunks)}\
+          \ \"\n                f\"({elapsed:.1f}s)\"\n            )\n\n    # Load\
+          \ collection for searching\n    client.load_collection(collection_name)\n\
+          \    stats = client.get_collection_stats(collection_name)\n\n    wall_clock\
+          \ = time.time() - start_time\n    print(f\"\\nIngestion complete: {total_inserted}\
+          \ vectors in {wall_clock:.1f}s\")\n    print(f\"Collection stats: {stats}\"\
+          )\n\n    return f\"{collection_name}:{total_inserted}\"\n\n"
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+    exec-model-deployment:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - model_deployment
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes>=28.1.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef model_deployment(\n    model_name: str,\n    namespace: str,\n\
+          \    runtime: str = \"vllm\",\n    model_path: str = \"\",\n    serving_runtime_name:\
+          \ str = \"vllm-runtime\",\n    min_replicas: int = 1,\n    max_replicas:\
+          \ int = 1,\n    gpu_count: int = 1,\n    api_url: str = \"\",\n    token:\
+          \ str = \"\",\n) -> str:\n    \"\"\"Deploy a model on OpenShift AI using\
+          \ an InferenceService.\n\n    Args:\n        model_name: Name/path of the\
+          \ model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n        namespace:\
+          \ Namespace to deploy the InferenceService.\n        runtime: Serving runtime\
+          \ to use (default: vllm).\n        model_path: Optional PVC path to the\
+          \ model. If empty, the model is pulled from HuggingFace.\n        serving_runtime_name:\
+          \ Name of the ServingRuntime CR.\n        min_replicas: Minimum number of\
+          \ replicas.\n        max_replicas: Maximum number of replicas.\n       \
+          \ gpu_count: Number of GPUs per replica.\n        api_url: OpenShift API\
+          \ URL.\n        token: OpenShift auth token.\n\n    Returns:\n        The\
+          \ inference endpoint URL.\n    \"\"\"\n    import time\n\n    from kubernetes\
+          \ import client as kclient\n\n    configuration = kclient.Configuration()\n\
+          \    configuration.host = api_url\n    configuration.verify_ssl = True\n\
+          \    configuration.api_key[\"authorization\"] = f\"Bearer {token}\"\n\n\
+          \    api_client = kclient.ApiClient(configuration)\n    custom_api = kclient.CustomObjectsApi(api_client)\n\
+          \n    isvc_name = model_name.split(\"/\")[-1].lower().replace(\".\", \"\
+          -\")\n\n    # Build the InferenceService spec\n    predictor_spec = {\n\
+          \        \"minReplicas\": min_replicas,\n        \"maxReplicas\": max_replicas,\n\
+          \        \"model\": {\n            \"modelFormat\": {\"name\": runtime},\n\
+          \            \"runtime\": serving_runtime_name,\n            \"resources\"\
+          : {\n                \"requests\": {\"cpu\": \"2\", \"memory\": \"8Gi\"\
+          },\n                \"limits\": {\"cpu\": \"4\", \"memory\": \"16Gi\"},\n\
+          \            },\n        },\n    }\n\n    if gpu_count > 0:\n        predictor_spec[\"\
+          model\"][\"resources\"][\"requests\"][\"nvidia.com/gpu\"] = str(gpu_count)\n\
+          \        predictor_spec[\"model\"][\"resources\"][\"limits\"][\"nvidia.com/gpu\"\
+          ] = str(gpu_count)\n\n    if model_path:\n        predictor_spec[\"model\"\
+          ][\"storageUri\"] = model_path\n    else:\n        predictor_spec[\"model\"\
+          ][\"storageUri\"] = f\"hf://{model_name}\"\n\n    isvc = {\n        \"apiVersion\"\
+          : \"serving.kserve.io/v1beta1\",\n        \"kind\": \"InferenceService\"\
+          ,\n        \"metadata\": {\n            \"name\": isvc_name,\n         \
+          \   \"namespace\": namespace,\n            \"annotations\": {\n        \
+          \        \"serving.kserve.io/deploymentMode\": \"RawDeployment\",\n    \
+          \        },\n        },\n        \"spec\": {\n            \"predictor\"\
+          : predictor_spec,\n        },\n    }\n\n    # Create or update the InferenceService\n\
+          \    try:\n        custom_api.get_namespaced_custom_object(\n          \
+          \  group=\"serving.kserve.io\",\n            version=\"v1beta1\",\n    \
+          \        namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        custom_api.patch_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n            body=isvc,\n        )\n    \
+          \    print(f\"InferenceService '{isvc_name}' updated.\")\n    except kclient.rest.ApiException\
+          \ as e:\n        if e.status == 404:\n            custom_api.create_namespaced_custom_object(\n\
+          \                group=\"serving.kserve.io\",\n                version=\"\
+          v1beta1\",\n                namespace=namespace,\n                plural=\"\
+          inferenceservices\",\n                body=isvc,\n            )\n      \
+          \      print(f\"InferenceService '{isvc_name}' created.\")\n        else:\n\
+          \            raise\n\n    # Wait for the InferenceService to become ready\n\
+          \    print(\"Waiting for InferenceService to become ready...\")\n    for\
+          \ attempt in range(60):\n        time.sleep(30)\n        obj = custom_api.get_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        conditions = obj.get(\"\
+          status\", {}).get(\"conditions\", [])\n        ready = any(\n          \
+          \  c.get(\"type\") == \"Ready\" and c.get(\"status\") == \"True\"\n    \
+          \        for c in conditions\n        )\n        if ready:\n           \
+          \ url = obj.get(\"status\", {}).get(\"url\", \"\")\n            print(f\"\
+          InferenceService ready: {url}\")\n            return f\"{url}/v1\"\n\n \
+          \   raise TimeoutError(\n        f\"InferenceService '{isvc_name}' did not\
+          \ become ready within 30 minutes.\"\n    )\n\n"
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+    exec-parse-and-chunk:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - parse_and_chunk
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'codeflare-sdk>=0.25.0'\
+          \ 'kubernetes>=28.1.0' 'ray[default]>=2.44.1'  &&  python3 -m pip install\
+          \ --quiet --no-warn-script-location 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef parse_and_chunk(\n    pvc_name: str,\n    pvc_mount_path: str,\n\
+          \    input_path: str,\n    ray_image: str,\n    namespace: str,\n    s3_endpoint:\
+          \ str,\n    s3_bucket: str,\n    s3_access_key: str,\n    s3_secret_key:\
+          \ str,\n    s3_prefix: str = \"chunks\",\n    tokenizer: str = \"sentence-transformers/all-MiniLM-L6-v2\"\
+          ,\n    chunk_max_tokens: int = 256,\n    num_workers: int = 2,\n    worker_cpus:\
+          \ int = 8,\n    worker_memory_gb: int = 16,\n    head_cpus: int = 2,\n \
+          \   head_memory_gb: int = 4,\n    cpus_per_actor: int = 4,\n    min_actors:\
+          \ int = 2,\n    max_actors: int = 4,\n    batch_size: int = 4,\n    num_files:\
+          \ int = 0,\n    timeout_seconds: int = 600,\n) -> str:\n    \"\"\"Parse\
+          \ PDFs and write chunked JSONL files to S3.\n\n    Args:\n        pvc_name:\
+          \ Name of the PVC with input PDFs.\n        pvc_mount_path: Mount path for\
+          \ the PVC inside pods.\n        input_path: Relative path to input PDFs\
+          \ under the PVC.\n        ray_image: Container image with Ray + Docling\
+          \ pre-installed.\n        namespace: OpenShift namespace for the RayJob.\n\
+          \        s3_endpoint: S3-compatible endpoint URL (e.g. MinIO).\n       \
+          \ s3_bucket: S3 bucket for output chunks.\n        s3_access_key: S3 access\
+          \ key.\n        s3_secret_key: S3 secret key.\n        s3_prefix: Key prefix\
+          \ for chunk files in S3.\n        tokenizer: Tokenizer for HybridChunker\
+          \ (usually the embedding model name).\n        chunk_max_tokens: Max tokens\
+          \ per chunk (HybridChunker).\n        num_workers: Number of Ray worker\
+          \ pods.\n        worker_cpus: CPUs per worker pod.\n        worker_memory_gb:\
+          \ Memory (GB) per worker pod.\n        head_cpus: CPUs for the Ray head\
+          \ pod.\n        head_memory_gb: Memory (GB) for the Ray head pod.\n    \
+          \    cpus_per_actor: CPUs per Docling processing actor.\n        min_actors:\
+          \ Minimum actor pool size.\n        max_actors: Maximum actor pool size.\n\
+          \        batch_size: Files per batch sent to each actor.\n        num_files:\
+          \ Number of PDFs to process (0 = all).\n        timeout_seconds: Per-file\
+          \ processing timeout.\n\n    Returns:\n        The S3 URI where JSONL chunk\
+          \ files were written.\n    \"\"\"\n    import json\n    import subprocess\n\
+          \    import time\n\n    from codeflare_sdk import ManagedClusterConfig,\
+          \ RayJob\n    from kubernetes.client import (\n        V1PersistentVolumeClaimVolumeSource,\n\
+          \        V1Volume,\n        V1VolumeMount,\n    )\n    from ray.runtime_env\
+          \ import RuntimeEnv\n\n    rayjob_name = f\"docling-chunk-{int(time.time())}\"\
+          \n    schedulable_cpus = worker_cpus - 2\n\n    shared_mount = V1VolumeMount(pvc_mount_path,\
+          \ name=\"shared-data\", read_only=True)\n    data_volume = V1Volume(\n \
+          \       name=\"shared-data\",\n        persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(\n\
+          \            claim_name=pvc_name, read_only=True,\n        ),\n    )\n\n\
+          \    cluster_config = ManagedClusterConfig(\n        head_cpu_requests=head_cpus,\n\
+          \        head_cpu_limits=head_cpus,\n        head_memory_requests=head_memory_gb,\n\
+          \        head_memory_limits=head_memory_gb,\n        num_workers=num_workers,\n\
+          \        worker_cpu_requests=worker_cpus,\n        worker_cpu_limits=worker_cpus,\n\
+          \        worker_memory_requests=worker_memory_gb,\n        worker_memory_limits=worker_memory_gb,\n\
+          \        volume_mounts=[shared_mount],\n        volumes=[data_volume],\n\
+          \        image=ray_image,\n        envs={\n            \"RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION\"\
+          : \"0.1\",\n            \"RAY_USE_TLS\": \"0\",\n        },\n    )\n\n \
+          \   job = RayJob(\n        job_name=rayjob_name,\n        entrypoint=\"\
+          python docling_chunk_process.py\",\n        cluster_config=cluster_config,\n\
+          \        namespace=namespace,\n        runtime_env=RuntimeEnv(\n       \
+          \     working_dir=\".\",\n            pip=[\n                \"opencv-python-headless\"\
+          ,\n                \"pypdfium2\",\n                \"boto3>=1.28.0\",\n\
+          \            ],\n            env_vars={\n                \"PVC_MOUNT_PATH\"\
+          : pvc_mount_path,\n                \"INPUT_PATH\": input_path,\n       \
+          \         \"NUM_FILES\": str(num_files),\n                \"MIN_ACTORS\"\
+          : str(min_actors),\n                \"MAX_ACTORS\": str(max_actors),\n \
+          \               \"CPUS_PER_ACTOR\": str(cpus_per_actor),\n             \
+          \   \"BATCH_SIZE\": str(batch_size),\n                \"REPARTITION_FACTOR\"\
+          : \"10\",\n                \"FILE_TIMEOUT\": str(timeout_seconds),\n   \
+          \             \"MAX_ERRORED_BLOCKS\": \"50\",\n                \"CHUNK_MAX_TOKENS\"\
+          : str(chunk_max_tokens),\n                \"TOKENIZER\": tokenizer,\n  \
+          \              \"S3_ENDPOINT\": s3_endpoint,\n                \"S3_BUCKET\"\
+          : s3_bucket,\n                \"S3_PREFIX\": s3_prefix,\n              \
+          \  \"S3_ACCESS_KEY\": s3_access_key,\n                \"S3_SECRET_KEY\"\
+          : s3_secret_key,\n            },\n        ),\n        ttl_seconds_after_finished=300,\n\
+          \    )\n\n    job.submit()\n    print(f\"RayJob '{rayjob_name}' submitted.\"\
+          )\n\n    # Patch head num-cpus=0 so no actors run on head\n    patch = [\n\
+          \        {\n            \"op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus\"\
+          ,\n            \"value\": \"0\",\n        },\n        {\n            \"\
+          op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/workerGroupSpecs/0/rayStartParams/num-cpus\"\
+          ,\n            \"value\": str(schedulable_cpus),\n        },\n    ]\n  \
+          \  subprocess.run(\n        [\n            \"oc\", \"patch\", \"rayjob\"\
+          , rayjob_name,\n            \"-n\", namespace,\n            \"--type\",\
+          \ \"json\",\n            \"-p\", json.dumps(patch),\n        ],\n      \
+          \  check=True,\n    )\n\n    # Wait for job completion\n    print(\"Waiting\
+          \ for RayJob to complete...\")\n    while True:\n        result = subprocess.run(\n\
+          \            [\n                \"oc\", \"get\", \"rayjob\", rayjob_name,\n\
+          \                \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.jobStatus}\"\
+          ,\n            ],\n            capture_output=True, text=True,\n       \
+          \ )\n        status = result.stdout.strip()\n        if status == \"SUCCEEDED\"\
+          :\n            print(\"RayJob completed successfully.\")\n            break\n\
+          \        elif status == \"FAILED\":\n            raise RuntimeError(f\"\
+          RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return\
+          \ f\"s3://{s3_bucket}/{s3_prefix}\"\n\n"
+        image: quay.io/modh/odh-generic-data-science-notebook:v3-2025a-20250523
+pipelineInfo:
+  description: 'Multi-step RAG pipeline: deploy embedding model, parse & chunk PDFs
+    with Docling (output to S3), ingest into Milvus, and deploy an LLM.'
+  name: rag-multi-step-pipeline
+root:
+  dag:
+    tasks:
+      deploy-embedding-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-deploy-embedding-model
+        inputs:
+          parameters:
+            api_url:
+              componentInputParameter: api_url
+            model_name:
+              componentInputParameter: embedding_model
+            namespace:
+              componentInputParameter: namespace
+            serving_runtime_name:
+              componentInputParameter: embedding_runtime
+            token:
+              componentInputParameter: token
+        taskInfo:
+          name: deploy-embedding-model
+      ingest-to-milvus:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-ingest-to-milvus
+        dependentTasks:
+        - deploy-embedding-model
+        - parse-and-chunk
+        inputs:
+          parameters:
+            collection_name:
+              componentInputParameter: collection_name
+            embedding_dim:
+              componentInputParameter: embedding_dim
+            embedding_endpoint:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: deploy-embedding-model
+            embedding_model:
+              componentInputParameter: embedding_model
+            milvus_host:
+              componentInputParameter: milvus_host
+            milvus_port:
+              componentInputParameter: milvus_port
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_bucket:
+              componentInputParameter: s3_bucket
+            s3_endpoint:
+              componentInputParameter: s3_endpoint
+            s3_prefix:
+              componentInputParameter: s3_prefix
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+        taskInfo:
+          name: ingest-to-milvus
+      model-deployment:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-model-deployment
+        dependentTasks:
+        - ingest-to-milvus
+        inputs:
+          parameters:
+            api_url:
+              componentInputParameter: api_url
+            gpu_count:
+              componentInputParameter: gpu_count
+            model_name:
+              componentInputParameter: llm_model_name
+            namespace:
+              componentInputParameter: namespace
+            token:
+              componentInputParameter: token
+        taskInfo:
+          name: model-deployment
+      parse-and-chunk:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-parse-and-chunk
+        inputs:
+          parameters:
+            chunk_max_tokens:
+              componentInputParameter: chunk_max_tokens
+            cpus_per_actor:
+              componentInputParameter: cpus_per_actor
+            input_path:
+              componentInputParameter: input_path
+            max_actors:
+              componentInputParameter: max_actors
+            min_actors:
+              componentInputParameter: min_actors
+            namespace:
+              componentInputParameter: namespace
+            num_files:
+              componentInputParameter: num_files
+            num_workers:
+              componentInputParameter: num_workers
+            pvc_mount_path:
+              componentInputParameter: pvc_mount_path
+            pvc_name:
+              componentInputParameter: pvc_name
+            ray_image:
+              componentInputParameter: ray_image
+            s3_access_key:
+              componentInputParameter: s3_access_key
+            s3_bucket:
+              componentInputParameter: s3_bucket
+            s3_endpoint:
+              componentInputParameter: s3_endpoint
+            s3_prefix:
+              componentInputParameter: s3_prefix
+            s3_secret_key:
+              componentInputParameter: s3_secret_key
+            tokenizer:
+              componentInputParameter: embedding_model
+            worker_cpus:
+              componentInputParameter: worker_cpus
+            worker_memory_gb:
+              componentInputParameter: worker_memory_gb
+        taskInfo:
+          name: parse-and-chunk
+  inputDefinitions:
+    parameters:
+      api_url:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      chunk_max_tokens:
+        defaultValue: 256.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      collection_name:
+        defaultValue: rag_documents
+        isOptional: true
+        parameterType: STRING
+      cpus_per_actor:
+        defaultValue: 4.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      embedding_dim:
+        defaultValue: 384.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      embedding_model:
+        defaultValue: sentence-transformers/all-MiniLM-L6-v2
+        isOptional: true
+        parameterType: STRING
+      embedding_runtime:
+        defaultValue: embedding-runtime
+        isOptional: true
+        parameterType: STRING
+      gpu_count:
+        defaultValue: 1.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      input_path:
+        defaultValue: input/pdfs
+        isOptional: true
+        parameterType: STRING
+      llm_model_name:
+        defaultValue: mistralai/Mistral-7B-Instruct-v0.3
+        isOptional: true
+        parameterType: STRING
+      max_actors:
+        defaultValue: 4.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      milvus_host:
+        defaultValue: milvus-milvus.milvus.svc.cluster.local
+        isOptional: true
+        parameterType: STRING
+      milvus_port:
+        defaultValue: 19530.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      min_actors:
+        defaultValue: 2.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      namespace:
+        defaultValue: rag-example
+        isOptional: true
+        parameterType: STRING
+      num_files:
+        defaultValue: 1000.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      num_workers:
+        defaultValue: 2.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      pvc_mount_path:
+        defaultValue: /mnt/data
+        isOptional: true
+        parameterType: STRING
+      pvc_name:
+        defaultValue: data-pvc
+        isOptional: true
+        parameterType: STRING
+      ray_image:
+        defaultValue: quay.io/rhoai-szaher/docling-ray:latest
+        isOptional: true
+        parameterType: STRING
+      s3_access_key:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      s3_bucket:
+        defaultValue: rag-chunks
+        isOptional: true
+        parameterType: STRING
+      s3_endpoint:
+        defaultValue: http://minio-service.default.svc.cluster.local:9000
+        isOptional: true
+        parameterType: STRING
+      s3_prefix:
+        defaultValue: chunks
+        isOptional: true
+        parameterType: STRING
+      s3_secret_key:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      token:
+        defaultValue: ''
+        isOptional: true
+        parameterType: STRING
+      worker_cpus:
+        defaultValue: 8.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      worker_memory_gb:
+        defaultValue: 16.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0
