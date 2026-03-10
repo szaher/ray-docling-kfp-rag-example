@@ -28,6 +28,5 @@ env/
 .DS_Store
 Thumbs.db
 
-# Compiled pipeline (regenerate with: python pipeline.py)
-rag_pipeline.yaml
+# Compiled component YAMLs (regenerate with: python component.py)
 *_component.yaml
