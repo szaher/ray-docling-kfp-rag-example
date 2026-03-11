@@ -20,11 +20,10 @@
 #    pvc_mount_path: str [Default: '/mnt/data']
 #    pvc_name: str [Default: 'data-pvc']
 #    ray_image: str [Default: 'quay.io/rhoai-szaher/docling-ray:latest']
-#    s3_access_key: str [Default: '']
 #    s3_bucket: str [Default: 'rag-chunks']
 #    s3_endpoint: str [Default: 'http://minio-service.default.svc.cluster.local:9000']
 #    s3_prefix: str [Default: 'chunks']
-#    s3_secret_key: str [Default: '']
+#    s3_secret_name: str [Default: 'minio-secret']
 #    worker_cpus: int [Default: 8.0]
 #    worker_memory_gb: int [Default: 16.0]
 components:
@@ -77,9 +76,6 @@ components:
           description: Milvus gRPC port.
           isOptional: true
           parameterType: NUMBER_INTEGER
-        s3_access_key:
-          description: S3 access key.
-          parameterType: STRING
         s3_bucket:
           description: S3 bucket containing chunk files.
           parameterType: STRING
@@ -90,9 +86,6 @@ components:
           defaultValue: chunks
           description: Key prefix for chunk files in S3.
           isOptional: true
-          parameterType: STRING
-        s3_secret_key:
-          description: S3 secret key.
           parameterType: STRING
     outputDefinitions:
       parameters:
@@ -207,9 +200,6 @@ components:
         ray_image:
           description: Container image with Ray + Docling pre-installed.
           parameterType: STRING
-        s3_access_key:
-          description: S3 access key.
-          parameterType: STRING
         s3_bucket:
           description: S3 bucket for output chunks.
           parameterType: STRING
@@ -220,9 +210,6 @@ components:
           defaultValue: chunks
           description: Key prefix for chunk files in S3.
           isOptional: true
-          parameterType: STRING
-        s3_secret_key:
-          description: S3 secret key.
           parameterType: STRING
         timeout_seconds:
           defaultValue: 600.0
@@ -279,16 +266,14 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef ingest_to_milvus(\n    s3_endpoint: str,\n    s3_bucket: str,\n\
-          \    s3_access_key: str,\n    s3_secret_key: str,\n    milvus_host: str,\n\
-          \    s3_prefix: str = \"chunks\",\n    embedding_endpoint: str = \"\",\n\
-          \    embedding_model: str = \"sentence-transformers/all-MiniLM-L6-v2\",\n\
-          \    embedding_dim: int = 384,\n    milvus_port: int = 19530,\n    milvus_db:\
+          \    milvus_host: str,\n    s3_prefix: str = \"chunks\",\n    embedding_endpoint:\
+          \ str = \"\",\n    embedding_model: str = \"sentence-transformers/all-MiniLM-L6-v2\"\
+          ,\n    embedding_dim: int = 384,\n    milvus_port: int = 19530,\n    milvus_db:\
           \ str = \"default\",\n    collection_name: str = \"rag_documents\",\n  \
           \  embed_batch_size: int = 64,\n    milvus_batch_size: int = 256,\n) ->\
           \ str:\n    \"\"\"Read chunks from S3, embed, and insert into Milvus.\n\n\
           \    Args:\n        s3_endpoint: S3-compatible endpoint URL (e.g. MinIO).\n\
-          \        s3_bucket: S3 bucket containing chunk files.\n        s3_access_key:\
-          \ S3 access key.\n        s3_secret_key: S3 secret key.\n        milvus_host:\
+          \        s3_bucket: S3 bucket containing chunk files.\n        milvus_host:\
           \ Milvus service hostname.\n        s3_prefix: Key prefix for chunk files\
           \ in S3.\n        embedding_endpoint: Optional embedding service URL. If\
           \ empty,\n            uses a local sentence-transformers model.\n      \
@@ -298,25 +283,25 @@ deploymentSpec:
           \ Milvus collection name.\n        embed_batch_size: Batch size for embedding\
           \ requests.\n        milvus_batch_size: Batch size for Milvus inserts.\n\
           \n    Returns:\n        The Milvus collection name and total vectors inserted.\n\
-          \    \"\"\"\n    import json\n    import time\n\n    import boto3\n    import\
-          \ requests as req_lib\n    from pymilvus import CollectionSchema, DataType,\
-          \ FieldSchema, MilvusClient\n\n    # --- Read chunks from S3 ---\n    s3\
-          \ = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
-          \        aws_access_key_id=s3_access_key,\n        aws_secret_access_key=s3_secret_key,\n\
-          \        region_name=\"us-east-1\",\n    )\n\n    all_chunks = []\n    file_count\
-          \ = 0\n    paginator = s3.get_paginator(\"list_objects_v2\")\n    for page\
-          \ in paginator.paginate(Bucket=s3_bucket, Prefix=s3_prefix + \"/\"):\n \
-          \       for obj in page.get(\"Contents\", []):\n            key = obj[\"\
-          Key\"]\n            if not key.endswith(\".jsonl\"):\n                continue\n\
-          \            resp = s3.get_object(Bucket=s3_bucket, Key=key)\n         \
-          \   body = resp[\"Body\"].read().decode(\"utf-8\")\n            for line\
-          \ in body.strip().split(\"\\n\"):\n                if line:\n          \
-          \          all_chunks.append(json.loads(line))\n            file_count +=\
-          \ 1\n\n    print(f\"Read {len(all_chunks)} chunks from {file_count} JSONL\
-          \ files \"\n          f\"in s3://{s3_bucket}/{s3_prefix}/\")\n\n    if not\
-          \ all_chunks:\n        raise FileNotFoundError(\n            f\"No chunks\
-          \ found in s3://{s3_bucket}/{s3_prefix}/\"\n        )\n\n    # --- Setup\
-          \ Milvus collection ---\n    uri = f\"http://{milvus_host}:{milvus_port}\"\
+          \    \"\"\"\n    import json\n    import os\n    import time\n\n    import\
+          \ boto3\n    import requests as req_lib\n    from pymilvus import CollectionSchema,\
+          \ DataType, FieldSchema, MilvusClient\n\n    # --- Read chunks from S3 ---\n\
+          \    s3 = boto3.client(\n        \"s3\",\n        endpoint_url=s3_endpoint,\n\
+          \        aws_access_key_id=os.environ[\"S3_ACCESS_KEY\"],\n        aws_secret_access_key=os.environ[\"\
+          S3_SECRET_KEY\"],\n        region_name=\"us-east-1\",\n    )\n\n    all_chunks\
+          \ = []\n    file_count = 0\n    paginator = s3.get_paginator(\"list_objects_v2\"\
+          )\n    for page in paginator.paginate(Bucket=s3_bucket, Prefix=s3_prefix\
+          \ + \"/\"):\n        for obj in page.get(\"Contents\", []):\n          \
+          \  key = obj[\"Key\"]\n            if not key.endswith(\".jsonl\"):\n  \
+          \              continue\n            resp = s3.get_object(Bucket=s3_bucket,\
+          \ Key=key)\n            body = resp[\"Body\"].read().decode(\"utf-8\")\n\
+          \            for line in body.strip().split(\"\\n\"):\n                if\
+          \ line:\n                    all_chunks.append(json.loads(line))\n     \
+          \       file_count += 1\n\n    print(f\"Read {len(all_chunks)} chunks from\
+          \ {file_count} JSONL files \"\n          f\"in s3://{s3_bucket}/{s3_prefix}/\"\
+          )\n\n    if not all_chunks:\n        raise FileNotFoundError(\n        \
+          \    f\"No chunks found in s3://{s3_bucket}/{s3_prefix}/\"\n        )\n\n\
+          \    # --- Setup Milvus collection ---\n    uri = f\"http://{milvus_host}:{milvus_port}\"\
           \n    client = MilvusClient(uri=uri, db_name=milvus_db)\n\n    if client.has_collection(collection_name):\n\
           \        print(f\"Dropping existing collection '{collection_name}'\")\n\
           \        client.drop_collection(collection_name)\n\n    schema = CollectionSchema(\n\
@@ -487,34 +472,33 @@ deploymentSpec:
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef parse_and_chunk(\n    pvc_name: str,\n    pvc_mount_path: str,\n\
           \    input_path: str,\n    ray_image: str,\n    namespace: str,\n    s3_endpoint:\
-          \ str,\n    s3_bucket: str,\n    s3_access_key: str,\n    s3_secret_key:\
-          \ str,\n    s3_prefix: str = \"chunks\",\n    tokenizer: str = \"sentence-transformers/all-MiniLM-L6-v2\"\
-          ,\n    chunk_max_tokens: int = 256,\n    num_workers: int = 2,\n    worker_cpus:\
-          \ int = 8,\n    worker_memory_gb: int = 16,\n    head_cpus: int = 2,\n \
-          \   head_memory_gb: int = 4,\n    cpus_per_actor: int = 4,\n    min_actors:\
-          \ int = 2,\n    max_actors: int = 4,\n    batch_size: int = 4,\n    num_files:\
-          \ int = 0,\n    timeout_seconds: int = 600,\n) -> str:\n    \"\"\"Parse\
-          \ PDFs and write chunked JSONL files to S3.\n\n    Args:\n        pvc_name:\
-          \ Name of the PVC with input PDFs.\n        pvc_mount_path: Mount path for\
-          \ the PVC inside pods.\n        input_path: Relative path to input PDFs\
-          \ under the PVC.\n        ray_image: Container image with Ray + Docling\
-          \ pre-installed.\n        namespace: OpenShift namespace for the RayJob.\n\
-          \        s3_endpoint: S3-compatible endpoint URL (e.g. MinIO).\n       \
-          \ s3_bucket: S3 bucket for output chunks.\n        s3_access_key: S3 access\
-          \ key.\n        s3_secret_key: S3 secret key.\n        s3_prefix: Key prefix\
-          \ for chunk files in S3.\n        tokenizer: Tokenizer for HybridChunker\
-          \ (usually the embedding model name).\n        chunk_max_tokens: Max tokens\
-          \ per chunk (HybridChunker).\n        num_workers: Number of Ray worker\
-          \ pods.\n        worker_cpus: CPUs per worker pod.\n        worker_memory_gb:\
-          \ Memory (GB) per worker pod.\n        head_cpus: CPUs for the Ray head\
-          \ pod.\n        head_memory_gb: Memory (GB) for the Ray head pod.\n    \
-          \    cpus_per_actor: CPUs per Docling processing actor.\n        min_actors:\
-          \ Minimum actor pool size.\n        max_actors: Maximum actor pool size.\n\
-          \        batch_size: Files per batch sent to each actor.\n        num_files:\
-          \ Number of PDFs to process (0 = all).\n        timeout_seconds: Per-file\
-          \ processing timeout.\n\n    Returns:\n        The S3 URI where JSONL chunk\
-          \ files were written.\n    \"\"\"\n    import json\n    import subprocess\n\
-          \    import tempfile\n    import textwrap\n    import time\n\n    # Entrypoint\
+          \ str,\n    s3_bucket: str,\n    s3_prefix: str = \"chunks\",\n    tokenizer:\
+          \ str = \"sentence-transformers/all-MiniLM-L6-v2\",\n    chunk_max_tokens:\
+          \ int = 256,\n    num_workers: int = 2,\n    worker_cpus: int = 8,\n   \
+          \ worker_memory_gb: int = 16,\n    head_cpus: int = 2,\n    head_memory_gb:\
+          \ int = 4,\n    cpus_per_actor: int = 4,\n    min_actors: int = 2,\n   \
+          \ max_actors: int = 4,\n    batch_size: int = 4,\n    num_files: int = 0,\n\
+          \    timeout_seconds: int = 600,\n) -> str:\n    \"\"\"Parse PDFs and write\
+          \ chunked JSONL files to S3.\n\n    Args:\n        pvc_name: Name of the\
+          \ PVC with input PDFs.\n        pvc_mount_path: Mount path for the PVC inside\
+          \ pods.\n        input_path: Relative path to input PDFs under the PVC.\n\
+          \        ray_image: Container image with Ray + Docling pre-installed.\n\
+          \        namespace: OpenShift namespace for the RayJob.\n        s3_endpoint:\
+          \ S3-compatible endpoint URL (e.g. MinIO).\n        s3_bucket: S3 bucket\
+          \ for output chunks.\n        s3_prefix: Key prefix for chunk files in S3.\n\
+          \        tokenizer: Tokenizer for HybridChunker (usually the embedding model\
+          \ name).\n        chunk_max_tokens: Max tokens per chunk (HybridChunker).\n\
+          \        num_workers: Number of Ray worker pods.\n        worker_cpus: CPUs\
+          \ per worker pod.\n        worker_memory_gb: Memory (GB) per worker pod.\n\
+          \        head_cpus: CPUs for the Ray head pod.\n        head_memory_gb:\
+          \ Memory (GB) for the Ray head pod.\n        cpus_per_actor: CPUs per Docling\
+          \ processing actor.\n        min_actors: Minimum actor pool size.\n    \
+          \    max_actors: Maximum actor pool size.\n        batch_size: Files per\
+          \ batch sent to each actor.\n        num_files: Number of PDFs to process\
+          \ (0 = all).\n        timeout_seconds: Per-file processing timeout.\n\n\
+          \    Returns:\n        The S3 URI where JSONL chunk files were written.\n\
+          \    \"\"\"\n    import json\n    import os\n    import subprocess\n   \
+          \ import tempfile\n    import textwrap\n    import time\n\n    # Entrypoint\
           \ script that runs on the Ray cluster.\n    # It parses PDFs with Docling,\
           \ chunks with HybridChunker,\n    # and writes JSONL files to S3.\n    _DOCLING_CHUNK_PROCESS_PY\
           \ = textwrap.dedent('''\\\n        \"\"\"Ray Data + Docling: parse PDFs\
@@ -733,11 +717,12 @@ deploymentSpec:
           : str(chunk_max_tokens),\n                \"TOKENIZER\": tokenizer,\n  \
           \              \"S3_ENDPOINT\": s3_endpoint,\n                \"S3_BUCKET\"\
           : s3_bucket,\n                \"S3_PREFIX\": s3_prefix,\n              \
-          \  \"S3_ACCESS_KEY\": s3_access_key,\n                \"S3_SECRET_KEY\"\
-          : s3_secret_key,\n            },\n        ),\n        ttl_seconds_after_finished=300,\n\
-          \    )\n\n    job.submit()\n    print(f\"RayJob '{rayjob_name}' submitted.\"\
-          )\n\n    # Patch head num-cpus=0 so no actors run on head\n    patch = [\n\
-          \        {\n            \"op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus\"\
+          \  \"S3_ACCESS_KEY\": os.environ[\"S3_ACCESS_KEY\"],\n                \"\
+          S3_SECRET_KEY\": os.environ[\"S3_SECRET_KEY\"],\n            },\n      \
+          \  ),\n        ttl_seconds_after_finished=300,\n    )\n\n    job.submit()\n\
+          \    print(f\"RayJob '{rayjob_name}' submitted.\")\n\n    # Patch head num-cpus=0\
+          \ so no actors run on head\n    patch = [\n        {\n            \"op\"\
+          : \"add\",\n            \"path\": \"/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus\"\
           ,\n            \"value\": \"0\",\n        },\n        {\n            \"\
           op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/workerGroupSpecs/0/rayStartParams/num-cpus\"\
           ,\n            \"value\": str(schedulable_cpus),\n        },\n    ]\n  \
@@ -781,16 +766,12 @@ root:
               componentInputParameter: milvus_host
             milvus_port:
               componentInputParameter: milvus_port
-            s3_access_key:
-              componentInputParameter: s3_access_key
             s3_bucket:
               componentInputParameter: s3_bucket
             s3_endpoint:
               componentInputParameter: s3_endpoint
             s3_prefix:
               componentInputParameter: s3_prefix
-            s3_secret_key:
-              componentInputParameter: s3_secret_key
         taskInfo:
           name: ingest-to-milvus
       model-deployment:
@@ -839,16 +820,12 @@ root:
               componentInputParameter: pvc_name
             ray_image:
               componentInputParameter: ray_image
-            s3_access_key:
-              componentInputParameter: s3_access_key
             s3_bucket:
               componentInputParameter: s3_bucket
             s3_endpoint:
               componentInputParameter: s3_endpoint
             s3_prefix:
               componentInputParameter: s3_prefix
-            s3_secret_key:
-              componentInputParameter: s3_secret_key
             tokenizer:
               componentInputParameter: embedding_model
             worker_cpus:
@@ -931,10 +908,6 @@ root:
         defaultValue: quay.io/rhoai-szaher/docling-ray:latest
         isOptional: true
         parameterType: STRING
-      s3_access_key:
-        defaultValue: ''
-        isOptional: true
-        parameterType: STRING
       s3_bucket:
         defaultValue: rag-chunks
         isOptional: true
@@ -947,8 +920,8 @@ root:
         defaultValue: chunks
         isOptional: true
         parameterType: STRING
-      s3_secret_key:
-        defaultValue: ''
+      s3_secret_name:
+        defaultValue: minio-secret
         isOptional: true
         parameterType: STRING
       worker_cpus:
@@ -961,3 +934,28 @@ root:
         parameterType: NUMBER_INTEGER
 schemaVersion: 2.1.0
 sdkVersion: kfp-2.16.0
+---
+platforms:
+  kubernetes:
+    deploymentSpec:
+      executors:
+        exec-ingest-to-milvus:
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: S3_ACCESS_KEY
+              secretKey: access_key
+            - envVar: S3_SECRET_KEY
+              secretKey: secret_key
+            optional: false
+            secretNameParameter:
+              componentInputParameter: s3_secret_name
+        exec-parse-and-chunk:
+          secretAsEnv:
+          - keyToEnv:
+            - envVar: S3_ACCESS_KEY
+              secretKey: access_key
+            - envVar: S3_SECRET_KEY
+              secretKey: secret_key
+            optional: false
+            secretNameParameter:
+              componentInputParameter: s3_secret_name

@@ -23,8 +23,6 @@ def parse_and_chunk(
     namespace: str,
     s3_endpoint: str,
     s3_bucket: str,
-    s3_access_key: str,
-    s3_secret_key: str,
     s3_prefix: str = "chunks",
     tokenizer: str = "sentence-transformers/all-MiniLM-L6-v2",
     chunk_max_tokens: int = 256,
@@ -50,8 +48,6 @@ def parse_and_chunk(
         namespace: OpenShift namespace for the RayJob.
         s3_endpoint: S3-compatible endpoint URL (e.g. MinIO).
         s3_bucket: S3 bucket for output chunks.
-        s3_access_key: S3 access key.
-        s3_secret_key: S3 secret key.
         s3_prefix: Key prefix for chunk files in S3.
         tokenizer: Tokenizer for HybridChunker (usually the embedding model name).
         chunk_max_tokens: Max tokens per chunk (HybridChunker).
@@ -71,6 +67,7 @@ def parse_and_chunk(
         The S3 URI where JSONL chunk files were written.
     """
     import json
+    import os
     import subprocess
     import tempfile
     import textwrap
@@ -451,8 +448,8 @@ def parse_and_chunk(
                 "S3_ENDPOINT": s3_endpoint,
                 "S3_BUCKET": s3_bucket,
                 "S3_PREFIX": s3_prefix,
-                "S3_ACCESS_KEY": s3_access_key,
-                "S3_SECRET_KEY": s3_secret_key,
+                "S3_ACCESS_KEY": os.environ["S3_ACCESS_KEY"],
+                "S3_SECRET_KEY": os.environ["S3_SECRET_KEY"],
             },
         ),
         ttl_seconds_after_finished=300,

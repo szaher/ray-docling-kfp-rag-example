@@ -39,6 +39,12 @@ rules:
     resources: ["servingruntimes"]
     verbs: ["get", "list"]
 
+  # Secrets — codeflare-sdk creates a Secret to store the zipped
+  # working directory (entrypoint script) for the RayJob
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "patch", "delete"]
+
   # Pods — needed for monitoring RayJob worker pods
   - apiGroups: [""]
     resources: ["pods", "pods/log"]

@@ -20,8 +20,6 @@ from kfp import dsl
 def ingest_to_milvus(
     s3_endpoint: str,
     s3_bucket: str,
-    s3_access_key: str,
-    s3_secret_key: str,
     milvus_host: str,
     s3_prefix: str = "chunks",
     embedding_endpoint: str = "",
@@ -38,8 +36,6 @@ def ingest_to_milvus(
     Args:
         s3_endpoint: S3-compatible endpoint URL (e.g. MinIO).
         s3_bucket: S3 bucket containing chunk files.
-        s3_access_key: S3 access key.
-        s3_secret_key: S3 secret key.
         milvus_host: Milvus service hostname.
         s3_prefix: Key prefix for chunk files in S3.
         embedding_endpoint: Optional embedding service URL. If empty,
@@ -56,6 +52,7 @@ def ingest_to_milvus(
         The Milvus collection name and total vectors inserted.
     """
     import json
+    import os
     import time
 
     import boto3
@@ -66,8 +63,8 @@ def ingest_to_milvus(
     s3 = boto3.client(
         "s3",
         endpoint_url=s3_endpoint,
-        aws_access_key_id=s3_access_key,
-        aws_secret_access_key=s3_secret_key,
+        aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+        aws_secret_access_key=os.environ["S3_SECRET_KEY"],
         region_name="us-east-1",
     )
 

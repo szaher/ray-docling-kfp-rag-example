@@ -133,10 +133,10 @@ The pipeline service account needs permissions to create RayJobs, InferenceServi
 
 ```bash
 # Check your pipeline service account name
-oc get sa -n rag-example | grep -E 'pipeline|dspa'
+oc get sa -n ray-docling | grep -E 'pipeline|dspa'
 
 # If needed, edit manifests/rbac.yaml to match your SA name
-# Default: ds-pipeline-dspa
+# Default: pipeline-runner-dspa
 
 # Apply RBAC
 oc apply -f manifests/rbac.yaml
@@ -146,9 +146,29 @@ The Role grants:
 - `ray.io/rayjobs`, `ray.io/rayclusters` — create, get, patch, delete (for RayJob submission)
 - `serving.kserve.io/inferenceservices` — create, get, patch, delete (for model deployment)
 - `serving.kserve.io/servingruntimes` — get, list (to verify runtime availability)
+- `secrets` — create, get, patch, delete (codeflare-sdk stores working directory as a Secret)
 - `pods`, `pods/log`, `events` — get, list, watch (for monitoring)
 
-### 2. Verify prerequisites
+### 2. Create S3 (MinIO) credentials Secret
+
+The pipeline reads S3 credentials from a Kubernetes Secret. Create it using the CLI:
+
+```bash
+oc create secret generic minio-secret \
+  --from-literal=access_key=<your-access-key> \
+  --from-literal=secret_key=<your-secret-key> \
+  -n ray-docling
+```
+
+Or apply the manifest (edit the values first):
+
+```bash
+oc apply -f manifests/minio-secret.yaml
+```
+
+The Secret name defaults to `minio-secret` and can be overridden via the `s3_secret_name` pipeline parameter.
+
+### 3. Verify prerequisites
 
 ```bash
 # KubeRay operator running

@@ -8,9 +8,11 @@ Orchestrates three reusable components:
 Intermediate chunks are stored in S3 (MinIO), not on the PVC.
 The PVC is mounted read-only for input PDFs.
 Embedding uses a local sentence-transformers model (no TEI runtime needed).
+S3 credentials are read from a Kubernetes Secret (not pipeline parameters).
 """
 
 from kfp import dsl
+from kfp import kubernetes
 
 from components.ingest_to_milvus.component import ingest_to_milvus
 from components.model_deployment.component import model_deployment
@@ -34,8 +36,7 @@ def rag_multistep_pipeline(
     s3_endpoint: str = "http://minio-service.default.svc.cluster.local:9000",
     s3_bucket: str = "rag-chunks",
     s3_prefix: str = "chunks",
-    s3_access_key: str = "",
-    s3_secret_key: str = "",
+    s3_secret_name: str = "minio-secret",
     # PDF parsing
     input_path: str = "input/pdfs",
     ray_image: str = "quay.io/rhoai-szaher/docling-ray:latest",
@@ -68,8 +69,6 @@ def rag_multistep_pipeline(
         s3_endpoint=s3_endpoint,
         s3_bucket=s3_bucket,
         s3_prefix=s3_prefix,
-        s3_access_key=s3_access_key,
-        s3_secret_key=s3_secret_key,
         tokenizer=embedding_model,
         chunk_max_tokens=chunk_max_tokens,
         num_workers=num_workers,
@@ -80,19 +79,33 @@ def rag_multistep_pipeline(
         max_actors=max_actors,
         num_files=num_files,
     )
+    kubernetes.use_secret_as_env(
+        chunk_task,
+        secret_name=s3_secret_name,
+        secret_key_to_env={
+            "access_key": "S3_ACCESS_KEY",
+            "secret_key": "S3_SECRET_KEY",
+        },
+    )
 
     # Step 2: Ingest into Milvus (local embedding, no TEI endpoint needed)
     ingest_task = ingest_to_milvus(
         s3_endpoint=s3_endpoint,
         s3_bucket=s3_bucket,
         s3_prefix=s3_prefix,
-        s3_access_key=s3_access_key,
-        s3_secret_key=s3_secret_key,
         milvus_host=milvus_host,
         milvus_port=milvus_port,
         collection_name=collection_name,
         embedding_model=embedding_model,
         embedding_dim=embedding_dim,
+    )
+    kubernetes.use_secret_as_env(
+        ingest_task,
+        secret_name=s3_secret_name,
+        secret_key_to_env={
+            "access_key": "S3_ACCESS_KEY",
+            "secret_key": "S3_SECRET_KEY",
+        },
     )
     ingest_task.after(chunk_task)
 
