@@ -13,7 +13,6 @@ from kfp import dsl
     packages_to_install=[
         "codeflare-sdk==0.35.0",
         "kubernetes>=28.1.0",
-        "ray[default]==2.53.0",
     ],
 )
 def parse_and_chunk(
