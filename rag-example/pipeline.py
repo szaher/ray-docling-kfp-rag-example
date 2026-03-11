@@ -24,7 +24,7 @@ def rag_pipeline(
     # Shared
     pvc_name: str = "data-pvc",
     pvc_mount_path: str = "/mnt/data",
-    namespace: str = "rag-example",
+    namespace: str = "ray-docling",
     # PDF -> Milvus
     input_path: str = "input/pdfs",
     ray_image: str = "quay.io/rhoai-szaher/docling-ray:latest",

@@ -14,7 +14,7 @@
 #    milvus_host: str [Default: 'milvus-milvus.milvus.svc.cluster.local']
 #    milvus_port: int [Default: 19530.0]
 #    min_actors: int [Default: 2.0]
-#    namespace: str [Default: 'rag-example']
+#    namespace: str [Default: 'ray-docling']
 #    num_files: int [Default: 1000.0]
 #    num_workers: int [Default: 2.0]
 #    pvc_mount_path: str [Default: '/mnt/data']
@@ -908,7 +908,7 @@ root:
         isOptional: true
         parameterType: NUMBER_INTEGER
       namespace:
-        defaultValue: rag-example
+        defaultValue: ray-docling
         isOptional: true
         parameterType: STRING
       num_files:

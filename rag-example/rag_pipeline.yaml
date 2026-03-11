@@ -14,7 +14,7 @@
 #    milvus_port: int [Default: 19530.0]
 #    min_actors: int [Default: 2.0]
 #    model_name: str [Default: 'mistralai/Mistral-7B-Instruct-v0.3']
-#    namespace: str [Default: 'rag-example']
+#    namespace: str [Default: 'ray-docling']
 #    num_files: int [Default: 0.0]
 #    num_workers: int [Default: 2.0]
 #    pvc_mount_path: str [Default: '/mnt/data']
@@ -701,7 +701,7 @@ root:
         isOptional: true
         parameterType: STRING
       namespace:
-        defaultValue: rag-example
+        defaultValue: ray-docling
         isOptional: true
         parameterType: STRING
       num_files:

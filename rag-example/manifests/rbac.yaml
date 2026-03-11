@@ -12,13 +12,17 @@
 #   oc apply -f rbac.yaml
 #
 # On OpenShift AI (RHOAI) with Data Science Pipelines, the service
-# account is typically named "ds-pipeline-dspa" or similar.
+# account is typically named "pipeline-runner-dspa" or "ds-pipeline-dspa".
+#
+# The Role lives in the TARGET namespace (where RayJobs/InferenceServices
+# are created). The RoleBinding grants access to the pipeline SA from the
+# SOURCE namespace (where the pipeline runs).
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: pipeline-rag-role
-  namespace: rag-example
+  namespace: ray-docling
 rules:
   # RayJob / RayCluster management (KubeRay)
   - apiGroups: ["ray.io"]
@@ -50,14 +54,18 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: pipeline-rag-rolebinding
-  namespace: rag-example
+  namespace: ray-docling
 subjects:
-  # Default Data Science Pipelines service account.
-  # Adjust this name to match your DSP installation:
-  #   oc get sa -n rag-example | grep -E 'pipeline|dspa'
+  # Pipeline runner service account from the namespace where the
+  # pipeline runs. Adjust to match your DSP installation:
+  #   oc get sa -n <pipeline-namespace> | grep -E 'pipeline|dspa'
+  - kind: ServiceAccount
+    name: pipeline-runner-dspa
+    namespace: ray-docling
+  # Also grant access to the dspa SA if present
   - kind: ServiceAccount
     name: ds-pipeline-dspa
-    namespace: rag-example
+    namespace: ray-docling
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

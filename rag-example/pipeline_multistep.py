@@ -29,7 +29,7 @@ def rag_multistep_pipeline(
     # Shared
     pvc_name: str = "data-pvc",
     pvc_mount_path: str = "/mnt/data",
-    namespace: str = "rag-example",
+    namespace: str = "ray-docling",
     # S3 (MinIO)
     s3_endpoint: str = "http://minio-service.default.svc.cluster.local:9000",
     s3_bucket: str = "rag-chunks",
