@@ -325,10 +325,207 @@ deploymentSpec:
           \ Files per batch sent to each actor.\n        num_files: Number of PDFs\
           \ to process (0 = all).\n        timeout_seconds: Per-file processing timeout.\n\
           \n    Returns:\n        The Milvus collection name and total chunks inserted.\n\
-          \    \"\"\"\n    import json\n    import subprocess\n    import time\n\n\
-          \    from codeflare_sdk import ManagedClusterConfig, RayJob\n    from kubernetes.client\
-          \ import (\n        V1PersistentVolumeClaimVolumeSource,\n        V1Volume,\n\
-          \        V1VolumeMount,\n    )\n    from ray.runtime_env import RuntimeEnv\n\
+          \    \"\"\"\n    import json\n    import subprocess\n    import tempfile\n\
+          \    import textwrap\n    import time\n\n    # Entrypoint script that runs\
+          \ on the Ray cluster.\n    # Parses PDFs with Docling, chunks, embeds with\
+          \ sentence-transformers,\n    # and inserts directly into Milvus.\n    _DOCLING_MILVUS_PROCESS_PY\
+          \ = textwrap.dedent('''\\\n        \"\"\"Ray Data + Docling + Milvus: parse,\
+          \ chunk, embed, and ingest PDFs.\"\"\"\n\n        import glob\n        import\
+          \ io\n        import multiprocessing as mp\n        import os\n        import\
+          \ queue\n        import time\n        from typing import Dict, List\n\n\
+          \        import pandas as pd\n        import ray\n\n        MIN_ACTORS =\
+          \ int(os.environ.get(\"MIN_ACTORS\", \"2\"))\n        MAX_ACTORS = int(os.environ.get(\"\
+          MAX_ACTORS\", \"4\"))\n        CPUS_PER_ACTOR = int(os.environ.get(\"CPUS_PER_ACTOR\"\
+          , \"4\"))\n        BATCH_SIZE = int(os.environ.get(\"BATCH_SIZE\", \"4\"\
+          ))\n        REPARTITION_FACTOR = int(os.environ.get(\"REPARTITION_FACTOR\"\
+          , \"10\"))\n\n        PVC_MOUNT_PATH = os.environ.get(\"PVC_MOUNT_PATH\"\
+          , \"/mnt/data\")\n        INPUT_PATH = os.environ.get(\"INPUT_PATH\", \"\
+          input/pdfs\")\n        NUM_FILES = int(os.environ.get(\"NUM_FILES\", \"\
+          0\"))\n\n        FILE_TIMEOUT = int(os.environ.get(\"FILE_TIMEOUT\", \"\
+          600\"))\n        MAX_ERRORED_BLOCKS = int(os.environ.get(\"MAX_ERRORED_BLOCKS\"\
+          , \"50\"))\n\n        MILVUS_HOST = os.environ.get(\"MILVUS_HOST\", \"milvus-milvus.milvus.svc.cluster.local\"\
+          )\n        MILVUS_PORT = int(os.environ.get(\"MILVUS_PORT\", \"19530\"))\n\
+          \        MILVUS_DB = os.environ.get(\"MILVUS_DB\", \"default\")\n      \
+          \  COLLECTION_NAME = os.environ.get(\"MILVUS_COLLECTION\", \"rag_documents\"\
+          )\n\n        EMBEDDING_MODEL = os.environ.get(\"EMBEDDING_MODEL\", \"sentence-transformers/all-MiniLM-L6-v2\"\
+          )\n        EMBEDDING_DIM = int(os.environ.get(\"EMBEDDING_DIM\", \"384\"\
+          ))\n        CHUNK_MAX_TOKENS = int(os.environ.get(\"CHUNK_MAX_TOKENS\",\
+          \ \"256\"))\n        MILVUS_BATCH_SIZE = int(os.environ.get(\"MILVUS_BATCH_SIZE\"\
+          , \"64\"))\n\n\n        def _converter_worker(\n            req_q, res_q,\
+          \ cpus_per_actor, chunk_max_tokens, embedding_model_name,\n            milvus_uri,\
+          \ milvus_db, collection_name, milvus_batch_size,\n        ):\n         \
+          \   os.environ[\"OMP_NUM_THREADS\"] = str(cpus_per_actor)\n            os.environ[\"\
+          MKL_NUM_THREADS\"] = str(cpus_per_actor)\n            os.environ[\"TOKENIZERS_PARALLELISM\"\
+          ] = \"false\"\n\n            from docling.chunking import HybridChunker\n\
+          \            from docling.datamodel.base_models import DocumentStream, InputFormat\n\
+          \            from docling.datamodel.pipeline_options import (\n        \
+          \        AcceleratorOptions, PdfPipelineOptions,\n            )\n      \
+          \      from docling.document_converter import DocumentConverter, PdfFormatOption\n\
+          \            from pymilvus import MilvusClient\n            from sentence_transformers\
+          \ import SentenceTransformer\n\n            pipeline_options = PdfPipelineOptions()\n\
+          \            pipeline_options.do_ocr = False\n            pipeline_options.do_table_structure\
+          \ = True\n            pipeline_options.accelerator_options = AcceleratorOptions(\n\
+          \                num_threads=cpus_per_actor, device=\"cpu\",\n         \
+          \   )\n            converter = DocumentConverter(\n                format_options={\n\
+          \                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)\n\
+          \                }\n            )\n            chunker = HybridChunker(tokenizer=embedding_model_name,\
+          \ max_tokens=chunk_max_tokens)\n            embed_model = SentenceTransformer(embedding_model_name)\n\
+          \            milvus_client = MilvusClient(uri=milvus_uri, db_name=milvus_db)\n\
+          \            res_q.put((\"ready\",))\n\n            while True:\n      \
+          \          msg = req_q.get()\n                if msg is None:\n        \
+          \            break\n                file_path = msg\n                try:\n\
+          \                    with open(file_path, \"rb\") as f:\n              \
+          \          file_bytes = f.read()\n                    if len(file_bytes)\
+          \ == 0:\n                        res_q.put((\"error\", file_path, 0, 0,\
+          \ \"File empty\"))\n                        continue\n                 \
+          \   fname = os.path.basename(file_path)\n                    stream = DocumentStream(name=fname,\
+          \ stream=io.BytesIO(file_bytes))\n                    result = converter.convert(stream)\n\
+          \                    doc = result.document\n                    pages =\
+          \ getattr(doc, \"pages\", None)\n                    page_count = len(pages)\
+          \ if pages is not None else 0\n                    chunks = list(chunker.chunk(doc))\n\
+          \                    if not chunks:\n                        res_q.put((\"\
+          empty\", file_path, page_count, 0, \"No chunks\"))\n                   \
+          \     continue\n                    chunk_texts = [c.text for c in chunks\
+          \ if c.text.strip()]\n                    if not chunk_texts:\n        \
+          \                res_q.put((\"empty\", file_path, page_count, 0, \"All chunks\
+          \ empty\"))\n                        continue\n                    embeddings\
+          \ = embed_model.encode(\n                        chunk_texts, normalize_embeddings=True,\
+          \ show_progress_bar=False,\n                    ).tolist()\n           \
+          \         total_inserted = 0\n                    for i in range(0, len(chunk_texts),\
+          \ milvus_batch_size):\n                        batch_texts = chunk_texts[i:i\
+          \ + milvus_batch_size]\n                        batch_embeddings = embeddings[i:i\
+          \ + milvus_batch_size]\n                        data = [\n             \
+          \               {\"source_file\": fname, \"chunk_index\": i + j,\n     \
+          \                        \"text\": text, \"embedding\": emb}\n         \
+          \                   for j, (text, emb) in enumerate(zip(batch_texts, batch_embeddings))\n\
+          \                        ]\n                        milvus_client.insert(collection_name=collection_name,\
+          \ data=data)\n                        total_inserted += len(data)\n    \
+          \                res_q.put((\"success\", file_path, page_count, total_inserted,\
+          \ \"\"))\n                except Exception as e:\n                    res_q.put((\"\
+          error\", file_path, 0, 0, str(e)[:200]))\n\n\n        class DoclingMilvusProcessor:\n\
+          \            def __init__(self):\n                import socket\n      \
+          \          self.hostname = socket.gethostname()\n                self._milvus_uri\
+          \ = f\"http://{MILVUS_HOST}:{MILVUS_PORT}\"\n                self._start_worker()\n\
+          \                print(f\"[{self.hostname}] DoclingMilvusProcessor ready\
+          \ (pid={self._worker.pid})\")\n\n            def _start_worker(self):\n\
+          \                self._req_q = mp.Queue()\n                self._res_q =\
+          \ mp.Queue()\n                self._worker = mp.Process(\n             \
+          \       target=_converter_worker,\n                    args=(\n        \
+          \                self._req_q, self._res_q, CPUS_PER_ACTOR, CHUNK_MAX_TOKENS,\n\
+          \                        EMBEDDING_MODEL, self._milvus_uri, MILVUS_DB,\n\
+          \                        COLLECTION_NAME, MILVUS_BATCH_SIZE,\n         \
+          \           ),\n                    daemon=True,\n                )\n  \
+          \              self._worker.start()\n                msg = self._res_q.get(timeout=600)\n\
+          \                assert msg[0] == \"ready\"\n\n            def _restart_worker(self):\n\
+          \                if self._worker.is_alive():\n                    self._worker.terminate()\n\
+          \                    self._worker.join(timeout=5)\n                    if\
+          \ self._worker.is_alive():\n                        self._worker.kill()\n\
+          \                        self._worker.join()\n                while True:\n\
+          \                    try:\n                        self._res_q.get_nowait()\n\
+          \                    except queue.Empty:\n                        break\n\
+          \                self._start_worker()\n                print(f\"[{self.hostname}]\
+          \ Restarted converter (pid={self._worker.pid})\")\n\n            def __call__(self,\
+          \ batch):\n                path_list = batch[\"path\"]\n               \
+          \ out = {k: [] for k in [\n                    \"source_file\", \"status\"\
+          , \"page_count\", \"chunks_inserted\",\n                    \"error\", \"\
+          duration_s\", \"actor_host\",\n                ]}\n                for file_path\
+          \ in path_list:\n                    fname = os.path.basename(file_path)\n\
+          \                    t0 = time.time()\n                    self._req_q.put(str(file_path))\n\
+          \                    try:\n                        result = self._res_q.get(timeout=FILE_TIMEOUT)\n\
+          \                        status, _, page_count, chunks_inserted, error_msg\
+          \ = result\n                    except queue.Empty:\n                  \
+          \      status, page_count, chunks_inserted = \"timeout\", 0, 0\n       \
+          \                 error_msg = f\"Timed out after {FILE_TIMEOUT}s\"\n   \
+          \                     self._restart_worker()\n                    elapsed\
+          \ = round(time.time() - t0, 3)\n                    out[\"source_file\"\
+          ].append(fname)\n                    out[\"status\"].append(status)\n  \
+          \                  out[\"page_count\"].append(page_count)\n            \
+          \        out[\"chunks_inserted\"].append(chunks_inserted)\n            \
+          \        out[\"error\"].append(error_msg)\n                    out[\"duration_s\"\
+          ].append(elapsed)\n                    out[\"actor_host\"].append(self.hostname)\n\
+          \                return out\n\n\n        def setup_milvus_collection():\n\
+          \            from pymilvus import CollectionSchema, DataType, FieldSchema,\
+          \ MilvusClient\n            uri = f\"http://{MILVUS_HOST}:{MILVUS_PORT}\"\
+          \n            client = MilvusClient(uri=uri, db_name=MILVUS_DB)\n      \
+          \      if client.has_collection(COLLECTION_NAME):\n                print(f\"\
+          Dropping existing collection '{COLLECTION_NAME}'\")\n                client.drop_collection(COLLECTION_NAME)\n\
+          \            schema = CollectionSchema(\n                fields=[\n    \
+          \                FieldSchema(name=\"id\", dtype=DataType.INT64, is_primary=True,\
+          \ auto_id=True),\n                    FieldSchema(name=\"source_file\",\
+          \ dtype=DataType.VARCHAR, max_length=512),\n                    FieldSchema(name=\"\
+          chunk_index\", dtype=DataType.INT64),\n                    FieldSchema(name=\"\
+          text\", dtype=DataType.VARCHAR, max_length=8192),\n                    FieldSchema(name=\"\
+          embedding\", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),\n        \
+          \        ],\n                description=\"RAG document chunks with embeddings\"\
+          ,\n            )\n            client.create_collection(collection_name=COLLECTION_NAME,\
+          \ schema=schema)\n            index_params = client.prepare_index_params()\n\
+          \            index_params.add_index(\n                field_name=\"embedding\"\
+          , index_type=\"IVF_FLAT\",\n                metric_type=\"COSINE\", params={\"\
+          nlist\": 128},\n            )\n            client.create_index(collection_name=COLLECTION_NAME,\
+          \ index_params=index_params)\n            print(f\"Collection '{COLLECTION_NAME}'\
+          \ created (dim={EMBEDDING_DIM}).\")\n            return client\n\n\n   \
+          \     def run():\n            input_full_path = os.path.join(PVC_MOUNT_PATH,\
+          \ INPUT_PATH)\n            pdf_paths = sorted(glob.glob(f\"{input_full_path}/**/*.pdf\"\
+          , recursive=True))\n            if NUM_FILES > 0:\n                pdf_paths\
+          \ = pdf_paths[:NUM_FILES]\n            print(f\"Found {len(pdf_paths)} PDFs\
+          \ to process.\")\n            if not pdf_paths:\n                print(\"\
+          No PDFs found. Exiting.\")\n                return\n            setup_milvus_collection()\n\
+          \            target_blocks = MAX_ACTORS * REPARTITION_FACTOR\n         \
+          \   ds = ray.data.from_pandas(pd.DataFrame({\"path\": pdf_paths}))\n   \
+          \         ds = ds.repartition(target_blocks)\n            print(f\"Repartitioned\
+          \ into {target_blocks} blocks for {MAX_ACTORS} max actors.\")\n\n      \
+          \      results_ds = ds.map_batches(\n                DoclingMilvusProcessor,\n\
+          \                compute=ray.data.ActorPoolStrategy(\n                 \
+          \   min_size=MIN_ACTORS, max_size=MAX_ACTORS,\n                ),\n    \
+          \            batch_size=BATCH_SIZE,\n                batch_format=\"numpy\"\
+          ,\n                num_cpus=CPUS_PER_ACTOR,\n            )\n\n         \
+          \   start_time = time.time()\n            success_count = error_count =\
+          \ timeout_count = empty_count = 0\n            total_pages = total_chunks\
+          \ = 0\n            actor_dist = {}\n            errors_list = []\n\n   \
+          \         for batch in results_ds.iter_batches(batch_size=200, batch_format=\"\
+          numpy\"):\n                n = len(batch[\"source_file\"])\n           \
+          \     for i in range(n):\n                    status = str(batch[\"status\"\
+          ][i])\n                    fname = str(batch[\"source_file\"][i])\n    \
+          \                if status == \"success\":\n                        success_count\
+          \ += 1\n                    elif status == \"timeout\":\n              \
+          \          timeout_count += 1\n                        errors_list.append((fname,\
+          \ str(batch[\"error\"][i])))\n                    elif status == \"empty\"\
+          :\n                        empty_count += 1\n                    else:\n\
+          \                        error_count += 1\n                        errors_list.append((fname,\
+          \ str(batch[\"error\"][i])))\n                    total_pages += int(batch[\"\
+          page_count\"][i])\n                    total_chunks += int(batch[\"chunks_inserted\"\
+          ][i])\n                    actor = str(batch[\"actor_host\"][i])\n     \
+          \               actor_dist[actor] = actor_dist.get(actor, 0) + 1\n\n   \
+          \         wall_clock = time.time() - start_time\n            total_files\
+          \ = success_count + error_count + timeout_count + empty_count\n\n      \
+          \      from pymilvus import MilvusClient\n            client = MilvusClient(uri=f\"\
+          http://{MILVUS_HOST}:{MILVUS_PORT}\", db_name=MILVUS_DB)\n            client.load_collection(COLLECTION_NAME)\n\
+          \            stats = client.get_collection_stats(COLLECTION_NAME)\n\n  \
+          \          print(\"\\\\n\" + \"=\" * 60)\n            print(\"PROCESSING\
+          \ REPORT\")\n            print(\"=\" * 60)\n            print(f\"Actors:\
+          \            {MIN_ACTORS}..{MAX_ACTORS} (CPUs/actor: {CPUS_PER_ACTOR})\"\
+          )\n            print(f\"Embedding model:   {EMBEDDING_MODEL}\")\n      \
+          \      print(f\"Collection:        {COLLECTION_NAME}\")\n            print(f\"\
+          Total files:       {total_files}\")\n            print(f\"Success:     \
+          \      {success_count}\")\n            print(f\"Empty:             {empty_count}\"\
+          )\n            print(f\"Errors:            {error_count}\")\n          \
+          \  print(f\"Timeouts:          {timeout_count}\")\n            print(f\"\
+          Total pages:       {total_pages}\")\n            print(f\"Total chunks:\
+          \      {total_chunks}\")\n            print(f\"Wall clock:        {wall_clock:.1f}s\"\
+          )\n            if wall_clock > 0:\n                print(f\"Files/second:\
+          \      {success_count / wall_clock:.2f}\")\n                print(f\"Chunks/second:\
+          \     {total_chunks / wall_clock:.2f}\")\n            print(f\"Collection\
+          \ stats:  {stats}\")\n            for actor, count in sorted(actor_dist.items()):\n\
+          \                pct = count / total_files * 100 if total_files else 0.0\n\
+          \                print(f\"  {actor}: {count} files ({pct:.1f}%)\")\n   \
+          \         if errors_list:\n                for fname, err in errors_list[:10]:\n\
+          \                    print(f\"  {fname}: {err[:80]}\")\n            print(\"\
+          =\" * 60)\n\n\n        if __name__ == \"__main__\":\n            ray.init(ignore_reinit_error=True)\n\
+          \            ctx = ray.data.DataContext.get_current()\n            ctx.max_errored_blocks\
+          \ = MAX_ERRORED_BLOCKS\n            run()\n    ''')\n\n    from codeflare_sdk\
+          \ import ManagedClusterConfig, RayJob\n    from kubernetes.client import\
+          \ (\n        V1PersistentVolumeClaimVolumeSource,\n        V1Volume,\n \
+          \       V1VolumeMount,\n    )\n    from ray.runtime_env import RuntimeEnv\n\
           \n    rayjob_name = f\"docling-milvus-{int(time.time())}\"\n    schedulable_cpus\
           \ = worker_cpus - 2\n\n    shared_mount = V1VolumeMount(pvc_mount_path,\
           \ name=\"shared-data\", read_only=True)\n    data_volume = V1Volume(\n \
@@ -342,10 +539,13 @@ deploymentSpec:
           \        volume_mounts=[shared_mount],\n        volumes=[data_volume],\n\
           \        image=ray_image,\n        envs={\n            \"RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION\"\
           : \"0.1\",\n            \"RAY_USE_TLS\": \"0\",\n        },\n    )\n\n \
-          \   job = RayJob(\n        job_name=rayjob_name,\n        entrypoint=\"\
+          \   # Write entrypoint script to a temp directory for codeflare-sdk validation\n\
+          \    work_dir = tempfile.mkdtemp(prefix=\"rayjob-\")\n    with open(f\"\
+          {work_dir}/docling_milvus_process.py\", \"w\") as f:\n        f.write(_DOCLING_MILVUS_PROCESS_PY)\n\
+          \n    job = RayJob(\n        job_name=rayjob_name,\n        entrypoint=\"\
           python docling_milvus_process.py\",\n        cluster_config=cluster_config,\n\
           \        namespace=namespace,\n        runtime_env=RuntimeEnv(\n       \
-          \     working_dir=\".\",\n            pip=[\n                \"opencv-python-headless\"\
+          \     working_dir=work_dir,\n            pip=[\n                \"opencv-python-headless\"\
           ,\n                \"pypdfium2\",\n                \"pymilvus>=2.4.0\",\n\
           \                \"sentence-transformers>=2.2.0\",\n            ],\n   \
           \         env_vars={\n                \"PVC_MOUNT_PATH\": pvc_mount_path,\n\
