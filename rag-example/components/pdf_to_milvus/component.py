@@ -11,9 +11,9 @@ from kfp import dsl
 @dsl.component(
     base_image="quay.io/modh/odh-generic-data-science-notebook:v3-20250827",
     packages_to_install=[
-        "codeflare-sdk>=0.25.0",
+        "codeflare-sdk==0.35.0",
         "kubernetes>=28.1.0",
-        "ray[default]>=2.44.1",
+        "ray[default]==2.53.0",
     ],
 )
 def pdf_to_milvus(

@@ -1,0 +1,41 @@
+---
+# ServingRuntime for text embedding models using HuggingFace TEI.
+# Apply to the namespace where you want to deploy embedding models:
+#   oc apply -f embedding-runtime.yaml -n ray-docling
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: embedding-runtime
+  annotations:
+    opendatahub.io/recommended-accelerators: '["nvidia.com/gpu"]'
+  labels:
+    opendatahub.io/dashboard: "true"
+spec:
+  annotations:
+    prometheus.io/port: "3000"
+    prometheus.io/path: /metrics
+  multiModel: false
+  supportedModelFormats:
+    - name: embedding
+      autoSelect: true
+  containers:
+    - name: kserve-container
+      image: quay.io/modh/text-embeddings-inference:v0.10.1-rhoai
+      args:
+        - "--model-id"
+        - "/mnt/models"
+        - "--port"
+        - "3000"
+      ports:
+        - containerPort: 3000
+          protocol: TCP
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 3000
+        initialDelaySeconds: 30
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 3000
+        initialDelaySeconds: 30

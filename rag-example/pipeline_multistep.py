@@ -1,19 +1,17 @@
 """KFP Pipeline: Multi-Step RAG Document Processing.
 
-Orchestrates four reusable components:
-1. Deploy embedding model (TEI InferenceService)
-2. Parse & chunk PDFs (Docling + HybridChunker via RayJob -> S3)
-3. Ingest into Milvus (read chunks from S3, embed, insert)
-4. Deploy LLM for RAG inference (vLLM InferenceService)
+Orchestrates three reusable components:
+1. Parse & chunk PDFs (Docling + HybridChunker via RayJob -> S3)
+2. Ingest into Milvus (read chunks from S3, embed locally, insert)
+3. Deploy LLM for RAG inference (vLLM InferenceService)
 
 Intermediate chunks are stored in S3 (MinIO), not on the PVC.
 The PVC is mounted read-only for input PDFs.
-All components use in-cluster Kubernetes config — no API URL or token needed.
+Embedding uses a local sentence-transformers model (no TEI runtime needed).
 """
 
 from kfp import dsl
 
-from components.deploy_embedding_model.component import deploy_embedding_model
 from components.ingest_to_milvus.component import ingest_to_milvus
 from components.model_deployment.component import model_deployment
 from components.parse_and_chunk.component import parse_and_chunk
@@ -22,8 +20,9 @@ from components.parse_and_chunk.component import parse_and_chunk
 @dsl.pipeline(
     name="RAG Multi-Step Pipeline",
     description=(
-        "Multi-step RAG pipeline: deploy embedding model, parse & chunk PDFs "
-        "with Docling (output to S3), ingest into Milvus, and deploy an LLM."
+        "Multi-step RAG pipeline: parse & chunk PDFs with Docling "
+        "(output to S3), ingest into Milvus with local embeddings, "
+        "and deploy an LLM for inference."
     ),
 )
 def rag_multistep_pipeline(
@@ -48,10 +47,9 @@ def rag_multistep_pipeline(
     max_actors: int = 4,
     chunk_max_tokens: int = 256,
     num_files: int = 1000,
-    # Embedding model
+    # Embedding
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
     embedding_dim: int = 384,
-    embedding_runtime: str = "embedding-runtime",
     # Milvus
     milvus_host: str = "milvus-milvus.milvus.svc.cluster.local",
     milvus_port: int = 19530,
@@ -60,14 +58,7 @@ def rag_multistep_pipeline(
     llm_model_name: str = "mistralai/Mistral-7B-Instruct-v0.3",
     gpu_count: int = 1,
 ):
-    # Step 1: Deploy embedding model
-    embed_task = deploy_embedding_model(
-        model_name=embedding_model,
-        namespace=namespace,
-        serving_runtime_name=embedding_runtime,
-    )
-
-    # Step 2: Parse & chunk PDFs (runs in parallel with step 1)
+    # Step 1: Parse & chunk PDFs -> S3
     chunk_task = parse_and_chunk(
         pvc_name=pvc_name,
         pvc_mount_path=pvc_mount_path,
@@ -90,7 +81,7 @@ def rag_multistep_pipeline(
         num_files=num_files,
     )
 
-    # Step 3: Ingest into Milvus (after both embedding model and chunks are ready)
+    # Step 2: Ingest into Milvus (local embedding, no TEI endpoint needed)
     ingest_task = ingest_to_milvus(
         s3_endpoint=s3_endpoint,
         s3_bucket=s3_bucket,
@@ -100,13 +91,12 @@ def rag_multistep_pipeline(
         milvus_host=milvus_host,
         milvus_port=milvus_port,
         collection_name=collection_name,
-        embedding_endpoint=embed_task.output,
         embedding_model=embedding_model,
         embedding_dim=embedding_dim,
     )
     ingest_task.after(chunk_task)
 
-    # Step 4: Deploy LLM for RAG inference (after ingestion)
+    # Step 3: Deploy LLM for RAG inference
     deploy_task = model_deployment(
         model_name=llm_model_name,
         namespace=namespace,

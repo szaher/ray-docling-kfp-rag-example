@@ -16,21 +16,19 @@ PDF (PVC) --> [RayJob: Docling + chunk + embed + Milvus insert] --> Deploy LLM
 
 ### 2. Multi-Step Pipeline (`pipeline_multistep.py` / `rag_multistep_pipeline.yaml`)
 
-Four reusable components with clear separation of concerns. Best for production use and component reuse across pipelines.
+Three reusable components with clear separation of concerns. Uses a local sentence-transformers model for embedding (no external embedding service needed). Best for production use and component reuse across pipelines.
 
 ```
-Step 1: Deploy Embedding Model (TEI InferenceService)
-                |                               |
-Step 2: Parse & Chunk PDFs -----(parallel)------+
+Step 1: Parse & Chunk PDFs
     (RayJob: Docling + HybridChunker -> JSONL on S3/MinIO)
-                |                               |
-Step 3: Ingest into Milvus  <----(both done)----+
-    (read chunks from S3, call embedding API, insert vectors)
                 |
-Step 4: Deploy LLM (vLLM InferenceService)
+Step 2: Ingest into Milvus
+    (read chunks from S3, embed locally with sentence-transformers, insert vectors)
+                |
+Step 3: Deploy LLM (vLLM InferenceService)
 ```
 
-Steps 1 and 2 run in parallel. Step 3 waits for both. Step 4 runs after ingestion.
+Steps run sequentially: parse, then ingest, then deploy.
 
 ## Architecture
 
@@ -40,19 +38,16 @@ Steps 1 and 2 run in parallel. Step 3 waits for both. Step 4 runs after ingestio
                     |      (PVC)        |
                     +--------+----------+
                              |
-              +--------------+--------------+
-              |                             |
-    +---------v---------+         +---------v---------+
-    |  Deploy Embedding |         |  Parse & Chunk    |
-    |  Model (TEI)      |         |  (RayJob/Docling) |
-    |                   |         |  -> JSONL on S3   |
-    +---------+---------+         +---------+---------+
-              |                             |
-              +--------------+--------------+
+                    +--------v----------+
+                    |  Parse & Chunk    |
+                    |  (RayJob/Docling) |
+                    |  -> JSONL on S3   |
+                    +--------+----------+
                              |
                     +--------v----------+
                     |  Ingest to Milvus |
-                    |  (embed + insert) |
+                    |  (local embed +   |
+                    |   insert vectors) |
                     +--------+----------+
                              |
                     +--------v----------+
@@ -64,7 +59,7 @@ Steps 1 and 2 run in parallel. Step 3 waits for both. Step 4 runs after ingestio
               |                             |
     +---------v---------+         +---------v---------+
     |  Query embedding  |         |   vLLM Model      |
-    |  (MiniLM / TEI)   |         |  (InferenceService)|
+    |  (MiniLM local)   |         |  (InferenceService)|
     +---------+---------+         +---------+---------+
               |                             |
               +--------------+--------------+
@@ -79,7 +74,6 @@ Steps 1 and 2 run in parallel. Step 3 waits for both. Step 4 runs after ingestio
 ```
 rag-example/
 +-- components/
-|   +-- deploy_embedding_model/  # Deploy embedding model (TEI InferenceService)
 |   +-- parse_and_chunk/         # Parse PDFs + chunk (RayJob -> JSONL on S3)
 |   +-- ingest_to_milvus/       # Embed chunks + insert into Milvus
 |   +-- pdf_to_milvus/          # Single-step: parse + chunk + embed + insert
@@ -107,7 +101,7 @@ rag-example/
 | KubeRay Operator | >= 1.1.0 | Manages RayJob / RayCluster CRDs |
 | Milvus | >= 2.4.0 | See `../milvus-ocp/` for OCP deployment guide |
 | MinIO / S3 | — | For intermediate chunk storage (multi-step pipeline) |
-| KServe | Included in RHOAI | For InferenceService / vLLM + TEI runtimes |
+| KServe | Included in RHOAI | For InferenceService / vLLM runtime |
 | GPU nodes | 1+ NVIDIA GPU | For vLLM model serving |
 | PVC (ReadOnlyMany or RWX) | — | Contains input PDFs at `<mount>/input/pdfs/` |
 | Python | 3.11+ | For running the notebook locally |
@@ -151,7 +145,7 @@ oc apply -f manifests/rbac.yaml
 The Role grants:
 - `ray.io/rayjobs`, `ray.io/rayclusters` — create, get, patch, delete (for RayJob submission)
 - `serving.kserve.io/inferenceservices` — create, get, patch, delete (for model deployment)
-- `serving.kserve.io/servingruntimes` — get, list (to verify runtime exists)
+- `serving.kserve.io/servingruntimes` — get, list (to verify runtime availability)
 - `pods`, `pods/log`, `events` — get, list, watch (for monitoring)
 
 ### 2. Verify prerequisites
@@ -252,10 +246,9 @@ Index: `IVF_FLAT` with `COSINE` metric and `nlist=128`.
 
 ## Design Decisions
 
-- **Multi-step separation:** Each component has a single responsibility. The embedding model, PDF parsing, Milvus ingestion, and LLM deployment are independent, reusable components that can be mixed into different pipelines.
-- **Parallel execution:** Steps 1 (deploy embedding model) and 2 (parse & chunk) run in parallel since they have no dependencies on each other. Step 3 (ingest) waits for both.
+- **Multi-step separation:** Each component has a single responsibility. PDF parsing, Milvus ingestion, and LLM deployment are independent, reusable components that can be mixed into different pipelines.
 - **S3 intermediate storage:** Chunks are stored as JSONL in S3 (MinIO) between the parse and ingest steps. This avoids needing a ReadWriteMany PVC (which requires NFS/CephFS), provides a checkpoint if ingestion fails, and keeps the input PVC read-only.
-- **Flexible embedding:** The ingest component accepts an optional `embedding_endpoint`. When provided, it calls the deployed TEI service. When empty, it falls back to a local sentence-transformers model.
+- **Local embedding:** The ingest component uses a local `sentence-transformers/all-MiniLM-L6-v2` model (~80MB) for embedding. No external embedding service or TEI runtime is needed. The component also supports an optional `embedding_endpoint` for deployed embedding services.
 - **Subprocess isolation:** Each Ray actor runs Docling in a separate subprocess for crash isolation and timeout handling.
 - **HybridChunker:** Structure-aware chunking that respects document structure (headings, paragraphs, tables) rather than splitting on arbitrary character boundaries.
 - **Head node exclusion:** RayJob patches `num-cpus=0` on the head node, reserving it for coordination.
@@ -277,16 +270,6 @@ c = MilvusClient(uri='http://milvus-milvus.milvus.svc.cluster.local:19530')
 print(c.list_collections())
 "
 ```
-
-### Embedding service not ready
-
-Check the InferenceService status:
-```bash
-oc get inferenceservice -n <namespace>
-oc describe inferenceservice <name> -n <namespace>
-```
-
-Ensure the embedding ServingRuntime CR exists in the namespace.
 
 ### Model deployment timeout
 
