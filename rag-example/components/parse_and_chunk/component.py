@@ -414,7 +414,6 @@ def parse_and_chunk(
         image=ray_image,
         envs={
             "RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION": "0.1",
-            "RAY_USE_TLS": "0",
         },
     )
 
@@ -479,22 +478,43 @@ def parse_and_chunk(
     )
     print(f"Unsuspended RayJob '{rayjob_name}'.")
 
+    # Wait for the RayCluster to be created by the RayJob controller,
+    # then patch it directly (the controller ignores RayJob spec changes).
+    print("Waiting for RayCluster to be created...")
+    raycluster_name = ""
+    for _ in range(60):
+        result = subprocess.run(
+            [
+                "oc", "get", "rayjob", rayjob_name,
+                "-n", namespace,
+                "-o", "jsonpath={.status.rayClusterName}",
+            ],
+            capture_output=True, text=True,
+        )
+        raycluster_name = result.stdout.strip()
+        if raycluster_name:
+            break
+        time.sleep(5)
+    if not raycluster_name:
+        raise RuntimeError(f"RayCluster was not created for RayJob '{rayjob_name}'.")
+    print(f"Found RayCluster '{raycluster_name}', patching num-cpus...")
+
     # Patch head num-cpus=0 so no actors run on head
     patch = [
         {
             "op": "add",
-            "path": "/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus",
+            "path": "/spec/headGroupSpec/rayStartParams/num-cpus",
             "value": "0",
         },
         {
             "op": "add",
-            "path": "/spec/rayClusterSpec/workerGroupSpecs/0/rayStartParams/num-cpus",
+            "path": "/spec/workerGroupSpecs/0/rayStartParams/num-cpus",
             "value": str(schedulable_cpus),
         },
     ]
     subprocess.run(
         [
-            "oc", "patch", "rayjob", rayjob_name,
+            "oc", "patch", "raycluster", raycluster_name,
             "-n", namespace,
             "--type", "json",
             "-p", json.dumps(patch),

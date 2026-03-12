@@ -698,9 +698,8 @@ deploymentSpec:
           \        worker_memory_requests=worker_memory_gb,\n        worker_memory_limits=worker_memory_gb,\n\
           \        volume_mounts=[shared_mount],\n        volumes=[data_volume],\n\
           \        image=ray_image,\n        envs={\n            \"RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION\"\
-          : \"0.1\",\n            \"RAY_USE_TLS\": \"0\",\n        },\n    )\n\n \
-          \   job = RayJob(\n        job_name=rayjob_name,\n        entrypoint=\"\
-          python -c \\\"import base64,os;exec(base64.b64decode(os.environ['ENTRYPOINT_SCRIPT']).decode())\\\
+          : \"0.1\",\n        },\n    )\n\n    job = RayJob(\n        job_name=rayjob_name,\n\
+          \        entrypoint=\"python -c \\\"import base64,os;exec(base64.b64decode(os.environ['ENTRYPOINT_SCRIPT']).decode())\\\
           \"\",\n        cluster_config=cluster_config,\n        namespace=namespace,\n\
           \        runtime_env=RuntimeEnv(\n            pip=[\n                \"\
           opencv-python-headless\",\n                \"pypdfium2\",\n            \
@@ -729,15 +728,26 @@ deploymentSpec:
           , \"patch\", \"rayjob\", rayjob_name,\n            \"-n\", namespace,\n\
           \            \"--type\", \"merge\",\n            \"-p\", json.dumps({\"\
           spec\": {\"suspend\": False}}),\n        ],\n        check=True,\n    )\n\
-          \    print(f\"Unsuspended RayJob '{rayjob_name}'.\")\n\n    # Patch head\
-          \ num-cpus=0 so no actors run on head\n    patch = [\n        {\n      \
-          \      \"op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus\"\
+          \    print(f\"Unsuspended RayJob '{rayjob_name}'.\")\n\n    # Wait for the\
+          \ RayCluster to be created by the RayJob controller,\n    # then patch it\
+          \ directly (the controller ignores RayJob spec changes).\n    print(\"Waiting\
+          \ for RayCluster to be created...\")\n    raycluster_name = \"\"\n    for\
+          \ _ in range(60):\n        result = subprocess.run(\n            [\n   \
+          \             \"oc\", \"get\", \"rayjob\", rayjob_name,\n              \
+          \  \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.rayClusterName}\"\
+          ,\n            ],\n            capture_output=True, text=True,\n       \
+          \ )\n        raycluster_name = result.stdout.strip()\n        if raycluster_name:\n\
+          \            break\n        time.sleep(5)\n    if not raycluster_name:\n\
+          \        raise RuntimeError(f\"RayCluster was not created for RayJob '{rayjob_name}'.\"\
+          )\n    print(f\"Found RayCluster '{raycluster_name}', patching num-cpus...\"\
+          )\n\n    # Patch head num-cpus=0 so no actors run on head\n    patch = [\n\
+          \        {\n            \"op\": \"add\",\n            \"path\": \"/spec/headGroupSpec/rayStartParams/num-cpus\"\
           ,\n            \"value\": \"0\",\n        },\n        {\n            \"\
-          op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/workerGroupSpecs/0/rayStartParams/num-cpus\"\
+          op\": \"add\",\n            \"path\": \"/spec/workerGroupSpecs/0/rayStartParams/num-cpus\"\
           ,\n            \"value\": str(schedulable_cpus),\n        },\n    ]\n  \
-          \  subprocess.run(\n        [\n            \"oc\", \"patch\", \"rayjob\"\
-          , rayjob_name,\n            \"-n\", namespace,\n            \"--type\",\
-          \ \"json\",\n            \"-p\", json.dumps(patch),\n        ],\n      \
+          \  subprocess.run(\n        [\n            \"oc\", \"patch\", \"raycluster\"\
+          , raycluster_name,\n            \"-n\", namespace,\n            \"--type\"\
+          , \"json\",\n            \"-p\", json.dumps(patch),\n        ],\n      \
           \  check=True,\n    )\n\n    # Wait for job completion\n    print(\"Waiting\
           \ for RayJob to complete...\")\n    while True:\n        result = subprocess.run(\n\
           \            [\n                \"oc\", \"get\", \"rayjob\", rayjob_name,\n\
