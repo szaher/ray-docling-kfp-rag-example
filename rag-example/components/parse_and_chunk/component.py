@@ -9,7 +9,7 @@ from kfp import dsl
 
 
 @dsl.component(
-    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-20250827",
+    base_image="registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc",
     packages_to_install=[
         "codeflare-sdk==0.35.0",
         "kubernetes>=28.1.0",
@@ -457,6 +457,29 @@ def parse_and_chunk(
 
     job.submit()
     print(f"RayJob '{rayjob_name}' submitted.")
+
+    # Remove kueue queue-name label so kueue does not manage this job
+    subprocess.run(
+        [
+            "oc", "label", "rayjob", rayjob_name,
+            "-n", namespace,
+            "kueue.x-k8s.io/queue-name-",
+        ],
+        check=True,
+    )
+    print(f"Removed kueue.x-k8s.io/queue-name label from RayJob '{rayjob_name}'.")
+
+    # Unsuspend the RayJob so it starts running
+    subprocess.run(
+        [
+            "oc", "patch", "rayjob", rayjob_name,
+            "-n", namespace,
+            "--type", "merge",
+            "-p", json.dumps({"spec": {"suspend": False}}),
+        ],
+        check=True,
+    )
+    print(f"Unsuspended RayJob '{rayjob_name}'.")
 
     # Patch head num-cpus=0 so no actors run on head
     patch = [

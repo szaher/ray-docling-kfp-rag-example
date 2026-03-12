@@ -11,7 +11,7 @@ from kfp import dsl
 
 
 @dsl.component(
-    base_image="quay.io/modh/odh-generic-data-science-notebook:v3-20250827",
+    base_image="registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc",
     packages_to_install=["kubernetes>=28.1.0"],
 )
 def deploy_embedding_model(
