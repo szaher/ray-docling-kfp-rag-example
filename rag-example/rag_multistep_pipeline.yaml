@@ -354,7 +354,7 @@ deploymentSpec:
           \ = time.time() - start_time\n    print(f\"\\nIngestion complete: {total_inserted}\
           \ vectors in {wall_clock:.1f}s\")\n    print(f\"Collection stats: {stats}\"\
           )\n\n    return f\"{collection_name}:{total_inserted}\"\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
+        image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
     exec-model-deployment:
       container:
         args:
@@ -442,7 +442,7 @@ deploymentSpec:
           InferenceService ready: {url}\")\n            return f\"{url}/v1\"\n\n \
           \   raise TimeoutError(\n        f\"InferenceService '{isvc_name}' did not\
           \ become ready within 30 minutes.\"\n    )\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
+        image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
     exec-parse-and-chunk:
       container:
         args:
@@ -720,9 +720,19 @@ deploymentSpec:
           \  \"S3_ACCESS_KEY\": os.environ[\"S3_ACCESS_KEY\"],\n                \"\
           S3_SECRET_KEY\": os.environ[\"S3_SECRET_KEY\"],\n            },\n      \
           \  ),\n        ttl_seconds_after_finished=300,\n    )\n\n    job.submit()\n\
-          \    print(f\"RayJob '{rayjob_name}' submitted.\")\n\n    # Patch head num-cpus=0\
-          \ so no actors run on head\n    patch = [\n        {\n            \"op\"\
-          : \"add\",\n            \"path\": \"/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus\"\
+          \    print(f\"RayJob '{rayjob_name}' submitted.\")\n\n    # Remove kueue\
+          \ queue-name label so kueue does not manage this job\n    subprocess.run(\n\
+          \        [\n            \"oc\", \"label\", \"rayjob\", rayjob_name,\n  \
+          \          \"-n\", namespace,\n            \"kueue.x-k8s.io/queue-name-\"\
+          ,\n        ],\n        check=True,\n    )\n    print(f\"Removed kueue.x-k8s.io/queue-name\
+          \ label from RayJob '{rayjob_name}'.\")\n\n    # Unsuspend the RayJob so\
+          \ it starts running\n    subprocess.run(\n        [\n            \"oc\"\
+          , \"patch\", \"rayjob\", rayjob_name,\n            \"-n\", namespace,\n\
+          \            \"--type\", \"merge\",\n            \"-p\", json.dumps({\"\
+          spec\": {\"suspend\": False}}),\n        ],\n        check=True,\n    )\n\
+          \    print(f\"Unsuspended RayJob '{rayjob_name}'.\")\n\n    # Patch head\
+          \ num-cpus=0 so no actors run on head\n    patch = [\n        {\n      \
+          \      \"op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/headGroupSpec/rayStartParams/num-cpus\"\
           ,\n            \"value\": \"0\",\n        },\n        {\n            \"\
           op\": \"add\",\n            \"path\": \"/spec/rayClusterSpec/workerGroupSpecs/0/rayStartParams/num-cpus\"\
           ,\n            \"value\": str(schedulable_cpus),\n        },\n    ]\n  \
@@ -739,7 +749,7 @@ deploymentSpec:
           \        elif status == \"FAILED\":\n            raise RuntimeError(f\"\
           RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return\
           \ f\"s3://{s3_bucket}/{s3_prefix}\"\n\n"
-        image: quay.io/modh/odh-generic-data-science-notebook:v3-20250827
+        image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
 pipelineInfo:
   description: 'Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to
     S3), ingest into Milvus with local embeddings, and deploy an LLM for inference.'
