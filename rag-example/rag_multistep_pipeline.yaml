@@ -497,44 +497,45 @@ deploymentSpec:
           \ batch sent to each actor.\n        num_files: Number of PDFs to process\
           \ (0 = all).\n        timeout_seconds: Per-file processing timeout.\n\n\
           \    Returns:\n        The S3 URI where JSONL chunk files were written.\n\
-          \    \"\"\"\n    import json\n    import os\n    import subprocess\n   \
-          \ import textwrap\n    import time\n\n    # Entrypoint script that runs\
-          \ on the Ray cluster.\n    # It parses PDFs with Docling, chunks with HybridChunker,\n\
-          \    # and writes JSONL files to S3.\n    _DOCLING_CHUNK_PROCESS_PY = textwrap.dedent('''\\\
-          \n        \"\"\"Ray Data + Docling: parse PDFs and chunk with HybridChunker.\"\
-          \"\"\n\n        import glob\n        import io\n        import json\n  \
-          \      import multiprocessing as mp\n        import os\n        import queue\n\
-          \        import time\n        from typing import Dict, List\n\n        import\
-          \ pandas as pd\n        import ray\n\n        MIN_ACTORS = int(os.environ.get(\"\
-          MIN_ACTORS\", \"2\"))\n        MAX_ACTORS = int(os.environ.get(\"MAX_ACTORS\"\
-          , \"4\"))\n        CPUS_PER_ACTOR = int(os.environ.get(\"CPUS_PER_ACTOR\"\
-          , \"4\"))\n        BATCH_SIZE = int(os.environ.get(\"BATCH_SIZE\", \"4\"\
-          ))\n        REPARTITION_FACTOR = int(os.environ.get(\"REPARTITION_FACTOR\"\
-          , \"10\"))\n\n        PVC_MOUNT_PATH = os.environ.get(\"PVC_MOUNT_PATH\"\
-          , \"/mnt/data\")\n        INPUT_PATH = os.environ.get(\"INPUT_PATH\", \"\
-          input/pdfs\")\n        NUM_FILES = int(os.environ.get(\"NUM_FILES\", \"\
-          0\"))\n\n        FILE_TIMEOUT = int(os.environ.get(\"FILE_TIMEOUT\", \"\
-          600\"))\n        MAX_ERRORED_BLOCKS = int(os.environ.get(\"MAX_ERRORED_BLOCKS\"\
-          , \"50\"))\n\n        CHUNK_MAX_TOKENS = int(os.environ.get(\"CHUNK_MAX_TOKENS\"\
-          , \"256\"))\n        TOKENIZER = os.environ.get(\"TOKENIZER\", \"sentence-transformers/all-MiniLM-L6-v2\"\
-          )\n\n        S3_ENDPOINT = os.environ.get(\"S3_ENDPOINT\", \"\")\n     \
-          \   S3_BUCKET = os.environ.get(\"S3_BUCKET\", \"rag-chunks\")\n        S3_PREFIX\
-          \ = os.environ.get(\"S3_PREFIX\", \"chunks\")\n        S3_ACCESS_KEY = os.environ.get(\"\
-          S3_ACCESS_KEY\", \"\")\n        S3_SECRET_KEY = os.environ.get(\"S3_SECRET_KEY\"\
-          , \"\")\n\n\n        def _get_s3_client():\n            import boto3\n \
-          \           return boto3.client(\n                \"s3\",\n            \
-          \    endpoint_url=S3_ENDPOINT,\n                aws_access_key_id=S3_ACCESS_KEY,\n\
-          \                aws_secret_access_key=S3_SECRET_KEY,\n                region_name=\"\
-          us-east-1\",\n            )\n\n\n        def _ensure_bucket(s3_client, bucket):\n\
-          \            try:\n                s3_client.head_bucket(Bucket=bucket)\n\
-          \            except s3_client.exceptions.ClientError:\n                s3_client.create_bucket(Bucket=bucket)\n\
-          \                print(f\"Created S3 bucket '{bucket}'\")\n\n\n        def\
-          \ _converter_worker(\n            req_q, res_q, cpus_per_actor, chunk_max_tokens,\
-          \ tokenizer_name,\n            s3_endpoint, s3_bucket, s3_prefix, s3_access_key,\
-          \ s3_secret_key,\n        ):\n            os.environ[\"OMP_NUM_THREADS\"\
-          ] = str(cpus_per_actor)\n            os.environ[\"MKL_NUM_THREADS\"] = str(cpus_per_actor)\n\
-          \            os.environ[\"TOKENIZERS_PARALLELISM\"] = \"false\"\n\n    \
-          \        import boto3\n            from docling.chunking import HybridChunker\n\
+          \    \"\"\"\n    import base64\n    import json\n    import os\n    import\
+          \ subprocess\n    import textwrap\n    import time\n\n    # Entrypoint script\
+          \ that runs on the Ray cluster.\n    # It parses PDFs with Docling, chunks\
+          \ with HybridChunker,\n    # and writes JSONL files to S3.\n    _DOCLING_CHUNK_PROCESS_PY\
+          \ = textwrap.dedent('''\\\n        \"\"\"Ray Data + Docling: parse PDFs\
+          \ and chunk with HybridChunker.\"\"\"\n\n        import glob\n        import\
+          \ io\n        import json\n        import multiprocessing as mp\n      \
+          \  import os\n        import queue\n        import time\n        from typing\
+          \ import Dict, List\n\n        import pandas as pd\n        import ray\n\
+          \n        MIN_ACTORS = int(os.environ.get(\"MIN_ACTORS\", \"2\"))\n    \
+          \    MAX_ACTORS = int(os.environ.get(\"MAX_ACTORS\", \"4\"))\n        CPUS_PER_ACTOR\
+          \ = int(os.environ.get(\"CPUS_PER_ACTOR\", \"4\"))\n        BATCH_SIZE =\
+          \ int(os.environ.get(\"BATCH_SIZE\", \"4\"))\n        REPARTITION_FACTOR\
+          \ = int(os.environ.get(\"REPARTITION_FACTOR\", \"10\"))\n\n        PVC_MOUNT_PATH\
+          \ = os.environ.get(\"PVC_MOUNT_PATH\", \"/mnt/data\")\n        INPUT_PATH\
+          \ = os.environ.get(\"INPUT_PATH\", \"input/pdfs\")\n        NUM_FILES =\
+          \ int(os.environ.get(\"NUM_FILES\", \"0\"))\n\n        FILE_TIMEOUT = int(os.environ.get(\"\
+          FILE_TIMEOUT\", \"600\"))\n        MAX_ERRORED_BLOCKS = int(os.environ.get(\"\
+          MAX_ERRORED_BLOCKS\", \"50\"))\n\n        CHUNK_MAX_TOKENS = int(os.environ.get(\"\
+          CHUNK_MAX_TOKENS\", \"256\"))\n        TOKENIZER = os.environ.get(\"TOKENIZER\"\
+          , \"sentence-transformers/all-MiniLM-L6-v2\")\n\n        S3_ENDPOINT = os.environ.get(\"\
+          S3_ENDPOINT\", \"\")\n        S3_BUCKET = os.environ.get(\"S3_BUCKET\",\
+          \ \"rag-chunks\")\n        S3_PREFIX = os.environ.get(\"S3_PREFIX\", \"\
+          chunks\")\n        S3_ACCESS_KEY = os.environ.get(\"S3_ACCESS_KEY\", \"\"\
+          )\n        S3_SECRET_KEY = os.environ.get(\"S3_SECRET_KEY\", \"\")\n\n\n\
+          \        def _get_s3_client():\n            import boto3\n            return\
+          \ boto3.client(\n                \"s3\",\n                endpoint_url=S3_ENDPOINT,\n\
+          \                aws_access_key_id=S3_ACCESS_KEY,\n                aws_secret_access_key=S3_SECRET_KEY,\n\
+          \                region_name=\"us-east-1\",\n            )\n\n\n       \
+          \ def _ensure_bucket(s3_client, bucket):\n            try:\n           \
+          \     s3_client.head_bucket(Bucket=bucket)\n            except s3_client.exceptions.ClientError:\n\
+          \                s3_client.create_bucket(Bucket=bucket)\n              \
+          \  print(f\"Created S3 bucket '{bucket}'\")\n\n\n        def _converter_worker(\n\
+          \            req_q, res_q, cpus_per_actor, chunk_max_tokens, tokenizer_name,\n\
+          \            s3_endpoint, s3_bucket, s3_prefix, s3_access_key, s3_secret_key,\n\
+          \        ):\n            os.environ[\"OMP_NUM_THREADS\"] = str(cpus_per_actor)\n\
+          \            os.environ[\"MKL_NUM_THREADS\"] = str(cpus_per_actor)\n   \
+          \         os.environ[\"TOKENIZERS_PARALLELISM\"] = \"false\"\n\n       \
+          \     import boto3\n            from docling.chunking import HybridChunker\n\
           \            from docling.datamodel.base_models import DocumentStream, InputFormat\n\
           \            from docling.datamodel.pipeline_options import (\n        \
           \        AcceleratorOptions, PdfPipelineOptions,\n            )\n      \
@@ -679,45 +680,37 @@ deploymentSpec:
           =\" * 60)\n\n\n        if __name__ == \"__main__\":\n            ray.init(ignore_reinit_error=True)\n\
           \            ctx = ray.data.DataContext.get_current()\n            ctx.max_errored_blocks\
           \ = MAX_ERRORED_BLOCKS\n            run()\n    ''')\n\n    from codeflare_sdk\
-          \ import ManagedClusterConfig, RayJob\n    from kubernetes import config\
-          \ as k8s_config\n    from kubernetes.client import (\n        CoreV1Api,\n\
-          \        V1ConfigMap,\n        V1ConfigMapVolumeSource,\n        V1ObjectMeta,\n\
-          \        V1PersistentVolumeClaimVolumeSource,\n        V1Volume,\n     \
-          \   V1VolumeMount,\n    )\n    from ray.runtime_env import RuntimeEnv\n\n\
-          \    rayjob_name = f\"docling-chunk-{int(time.time())}\"\n    configmap_name\
-          \ = f\"{rayjob_name}-script\"\n    schedulable_cpus = worker_cpus - 2\n\
-          \    script_mount_path = \"/opt/rayjob\"\n\n    # Create a ConfigMap with\
-          \ the entrypoint script\n    k8s_config.load_incluster_config()\n    core_v1\
-          \ = CoreV1Api()\n    core_v1.create_namespaced_config_map(\n        namespace=namespace,\n\
-          \        body=V1ConfigMap(\n            metadata=V1ObjectMeta(name=configmap_name),\n\
-          \            data={\"docling_chunk_process.py\": _DOCLING_CHUNK_PROCESS_PY},\n\
-          \        ),\n    )\n    print(f\"Created ConfigMap '{configmap_name}' with\
-          \ entrypoint script.\")\n\n    shared_mount = V1VolumeMount(pvc_mount_path,\
-          \ name=\"shared-data\", read_only=True)\n    data_volume = V1Volume(\n \
-          \       name=\"shared-data\",\n        persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(\n\
-          \            claim_name=pvc_name, read_only=True,\n        ),\n    )\n \
-          \   script_mount = V1VolumeMount(script_mount_path, name=\"entrypoint-script\"\
-          , read_only=True)\n    script_volume = V1Volume(\n        name=\"entrypoint-script\"\
-          ,\n        config_map=V1ConfigMapVolumeSource(name=configmap_name),\n  \
-          \  )\n\n    cluster_config = ManagedClusterConfig(\n        head_cpu_requests=head_cpus,\n\
+          \ import ManagedClusterConfig, RayJob\n    from kubernetes.client import\
+          \ (\n        V1PersistentVolumeClaimVolumeSource,\n        V1Volume,\n \
+          \       V1VolumeMount,\n    )\n    from ray.runtime_env import RuntimeEnv\n\
+          \n    rayjob_name = f\"docling-chunk-{int(time.time())}\"\n    schedulable_cpus\
+          \ = worker_cpus - 2\n\n    # Encode entrypoint script as base64 env var\
+          \ to avoid creating\n    # Secrets or ConfigMaps (service account lacks\
+          \ permissions for both).\n    script_b64 = base64.b64encode(\n        _DOCLING_CHUNK_PROCESS_PY.encode()\n\
+          \    ).decode()\n\n    shared_mount = V1VolumeMount(pvc_mount_path, name=\"\
+          shared-data\", read_only=True)\n    data_volume = V1Volume(\n        name=\"\
+          shared-data\",\n        persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(\n\
+          \            claim_name=pvc_name, read_only=True,\n        ),\n    )\n\n\
+          \    cluster_config = ManagedClusterConfig(\n        head_cpu_requests=head_cpus,\n\
           \        head_cpu_limits=head_cpus,\n        head_memory_requests=head_memory_gb,\n\
           \        head_memory_limits=head_memory_gb,\n        num_workers=num_workers,\n\
           \        worker_cpu_requests=worker_cpus,\n        worker_cpu_limits=worker_cpus,\n\
           \        worker_memory_requests=worker_memory_gb,\n        worker_memory_limits=worker_memory_gb,\n\
-          \        volume_mounts=[shared_mount, script_mount],\n        volumes=[data_volume,\
-          \ script_volume],\n        image=ray_image,\n        envs={\n          \
-          \  \"RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION\": \"0.1\",\n          \
-          \  \"RAY_USE_TLS\": \"0\",\n        },\n    )\n\n    job = RayJob(\n   \
-          \     job_name=rayjob_name,\n        entrypoint=f\"python {script_mount_path}/docling_chunk_process.py\"\
-          ,\n        cluster_config=cluster_config,\n        namespace=namespace,\n\
+          \        volume_mounts=[shared_mount],\n        volumes=[data_volume],\n\
+          \        image=ray_image,\n        envs={\n            \"RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION\"\
+          : \"0.1\",\n            \"RAY_USE_TLS\": \"0\",\n        },\n    )\n\n \
+          \   job = RayJob(\n        job_name=rayjob_name,\n        entrypoint=\"\
+          python -c \\\"import base64,os;exec(base64.b64decode(os.environ['ENTRYPOINT_SCRIPT']).decode())\\\
+          \"\",\n        cluster_config=cluster_config,\n        namespace=namespace,\n\
           \        runtime_env=RuntimeEnv(\n            pip=[\n                \"\
           opencv-python-headless\",\n                \"pypdfium2\",\n            \
           \    \"boto3>=1.28.0\",\n            ],\n            env_vars={\n      \
-          \          \"PVC_MOUNT_PATH\": pvc_mount_path,\n                \"INPUT_PATH\"\
-          : input_path,\n                \"NUM_FILES\": str(num_files),\n        \
-          \        \"MIN_ACTORS\": str(min_actors),\n                \"MAX_ACTORS\"\
-          : str(max_actors),\n                \"CPUS_PER_ACTOR\": str(cpus_per_actor),\n\
-          \                \"BATCH_SIZE\": str(batch_size),\n                \"REPARTITION_FACTOR\"\
+          \          \"ENTRYPOINT_SCRIPT\": script_b64,\n                \"PVC_MOUNT_PATH\"\
+          : pvc_mount_path,\n                \"INPUT_PATH\": input_path,\n       \
+          \         \"NUM_FILES\": str(num_files),\n                \"MIN_ACTORS\"\
+          : str(min_actors),\n                \"MAX_ACTORS\": str(max_actors),\n \
+          \               \"CPUS_PER_ACTOR\": str(cpus_per_actor),\n             \
+          \   \"BATCH_SIZE\": str(batch_size),\n                \"REPARTITION_FACTOR\"\
           : \"10\",\n                \"FILE_TIMEOUT\": str(timeout_seconds),\n   \
           \             \"MAX_ERRORED_BLOCKS\": \"50\",\n                \"CHUNK_MAX_TOKENS\"\
           : str(chunk_max_tokens),\n                \"TOKENIZER\": tokenizer,\n  \
