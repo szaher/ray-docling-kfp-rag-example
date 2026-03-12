@@ -66,6 +66,7 @@ def parse_and_chunk(
     Returns:
         The S3 URI where JSONL chunk files were written.
     """
+    import base64
     import json
     import os
     import subprocess
@@ -374,12 +375,7 @@ def parse_and_chunk(
     ''')
 
     from codeflare_sdk import ManagedClusterConfig, RayJob
-    from kubernetes import config as k8s_config
     from kubernetes.client import (
-        CoreV1Api,
-        V1ConfigMap,
-        V1ConfigMapVolumeSource,
-        V1ObjectMeta,
         V1PersistentVolumeClaimVolumeSource,
         V1Volume,
         V1VolumeMount,
@@ -387,21 +383,13 @@ def parse_and_chunk(
     from ray.runtime_env import RuntimeEnv
 
     rayjob_name = f"docling-chunk-{int(time.time())}"
-    configmap_name = f"{rayjob_name}-script"
     schedulable_cpus = worker_cpus - 2
-    script_mount_path = "/opt/rayjob"
 
-    # Create a ConfigMap with the entrypoint script
-    k8s_config.load_incluster_config()
-    core_v1 = CoreV1Api()
-    core_v1.create_namespaced_config_map(
-        namespace=namespace,
-        body=V1ConfigMap(
-            metadata=V1ObjectMeta(name=configmap_name),
-            data={"docling_chunk_process.py": _DOCLING_CHUNK_PROCESS_PY},
-        ),
-    )
-    print(f"Created ConfigMap '{configmap_name}' with entrypoint script.")
+    # Encode entrypoint script as base64 env var to avoid creating
+    # Secrets or ConfigMaps (service account lacks permissions for both).
+    script_b64 = base64.b64encode(
+        _DOCLING_CHUNK_PROCESS_PY.encode()
+    ).decode()
 
     shared_mount = V1VolumeMount(pvc_mount_path, name="shared-data", read_only=True)
     data_volume = V1Volume(
@@ -409,11 +397,6 @@ def parse_and_chunk(
         persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
             claim_name=pvc_name, read_only=True,
         ),
-    )
-    script_mount = V1VolumeMount(script_mount_path, name="entrypoint-script", read_only=True)
-    script_volume = V1Volume(
-        name="entrypoint-script",
-        config_map=V1ConfigMapVolumeSource(name=configmap_name),
     )
 
     cluster_config = ManagedClusterConfig(
@@ -426,8 +409,8 @@ def parse_and_chunk(
         worker_cpu_limits=worker_cpus,
         worker_memory_requests=worker_memory_gb,
         worker_memory_limits=worker_memory_gb,
-        volume_mounts=[shared_mount, script_mount],
-        volumes=[data_volume, script_volume],
+        volume_mounts=[shared_mount],
+        volumes=[data_volume],
         image=ray_image,
         envs={
             "RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION": "0.1",
@@ -437,7 +420,7 @@ def parse_and_chunk(
 
     job = RayJob(
         job_name=rayjob_name,
-        entrypoint=f"python {script_mount_path}/docling_chunk_process.py",
+        entrypoint="python -c \"import base64,os;exec(base64.b64decode(os.environ['ENTRYPOINT_SCRIPT']).decode())\"",
         cluster_config=cluster_config,
         namespace=namespace,
         runtime_env=RuntimeEnv(
@@ -447,6 +430,7 @@ def parse_and_chunk(
                 "boto3>=1.28.0",
             ],
             env_vars={
+                "ENTRYPOINT_SCRIPT": script_b64,
                 "PVC_MOUNT_PATH": pvc_mount_path,
                 "INPUT_PATH": input_path,
                 "NUM_FILES": str(num_files),
