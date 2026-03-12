@@ -69,7 +69,6 @@ def parse_and_chunk(
     import json
     import os
     import subprocess
-    import tempfile
     import textwrap
     import time
 
@@ -375,7 +374,12 @@ def parse_and_chunk(
     ''')
 
     from codeflare_sdk import ManagedClusterConfig, RayJob
+    from kubernetes import config as k8s_config
     from kubernetes.client import (
+        CoreV1Api,
+        V1ConfigMap,
+        V1ConfigMapVolumeSource,
+        V1ObjectMeta,
         V1PersistentVolumeClaimVolumeSource,
         V1Volume,
         V1VolumeMount,
@@ -383,7 +387,21 @@ def parse_and_chunk(
     from ray.runtime_env import RuntimeEnv
 
     rayjob_name = f"docling-chunk-{int(time.time())}"
+    configmap_name = f"{rayjob_name}-script"
     schedulable_cpus = worker_cpus - 2
+    script_mount_path = "/opt/rayjob"
+
+    # Create a ConfigMap with the entrypoint script
+    k8s_config.load_incluster_config()
+    core_v1 = CoreV1Api()
+    core_v1.create_namespaced_config_map(
+        namespace=namespace,
+        body=V1ConfigMap(
+            metadata=V1ObjectMeta(name=configmap_name),
+            data={"docling_chunk_process.py": _DOCLING_CHUNK_PROCESS_PY},
+        ),
+    )
+    print(f"Created ConfigMap '{configmap_name}' with entrypoint script.")
 
     shared_mount = V1VolumeMount(pvc_mount_path, name="shared-data", read_only=True)
     data_volume = V1Volume(
@@ -391,6 +409,11 @@ def parse_and_chunk(
         persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
             claim_name=pvc_name, read_only=True,
         ),
+    )
+    script_mount = V1VolumeMount(script_mount_path, name="entrypoint-script", read_only=True)
+    script_volume = V1Volume(
+        name="entrypoint-script",
+        config_map=V1ConfigMapVolumeSource(name=configmap_name),
     )
 
     cluster_config = ManagedClusterConfig(
@@ -403,8 +426,8 @@ def parse_and_chunk(
         worker_cpu_limits=worker_cpus,
         worker_memory_requests=worker_memory_gb,
         worker_memory_limits=worker_memory_gb,
-        volume_mounts=[shared_mount],
-        volumes=[data_volume],
+        volume_mounts=[shared_mount, script_mount],
+        volumes=[data_volume, script_volume],
         image=ray_image,
         envs={
             "RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION": "0.1",
@@ -412,21 +435,12 @@ def parse_and_chunk(
         },
     )
 
-    # Write the entrypoint script to a temp directory so codeflare-sdk
-    # can validate and upload it to the Ray cluster.
-    entrypoint_script = _DOCLING_CHUNK_PROCESS_PY
-    work_dir = tempfile.mkdtemp(prefix="rayjob-")
-    script_path = f"{work_dir}/docling_chunk_process.py"
-    with open(script_path, "w") as f:
-        f.write(entrypoint_script)
-
     job = RayJob(
         job_name=rayjob_name,
-        entrypoint="python docling_chunk_process.py",
+        entrypoint=f"python {script_mount_path}/docling_chunk_process.py",
         cluster_config=cluster_config,
         namespace=namespace,
         runtime_env=RuntimeEnv(
-            working_dir=work_dir,
             pip=[
                 "opencv-python-headless",
                 "pypdfium2",
