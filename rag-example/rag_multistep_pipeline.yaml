@@ -1,6 +1,6 @@
 # PIPELINE DEFINITION
 # Name: rag-multi-step-pipeline
-# Description: Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to S3), ingest into Milvus with local embeddings, and deploy an LLM for inference.
+# Description: Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to S3), ingest into Milvus with local embeddings, download and deploy an LLM for inference (cached on PVC).
 # Inputs:
 #    chunk_max_tokens: int [Default: 256.0]
 #    collection_name: str [Default: 'rag_documents']
@@ -11,9 +11,11 @@
 #    input_path: str [Default: 'input/pdfs']
 #    llm_model_name: str [Default: 'mistralai/Mistral-7B-Instruct-v0.3']
 #    max_actors: int [Default: 4.0]
+#    max_model_len: int [Default: 4096.0]
 #    milvus_host: str [Default: 'milvus-milvus.milvus.svc.cluster.local']
 #    milvus_port: int [Default: 19530.0]
 #    min_actors: int [Default: 2.0]
+#    model_cache_pvc: str [Default: 'model-cache-pvc']
 #    namespace: str [Default: 'ray-docling']
 #    num_files: int [Default: 1000.0]
 #    num_workers: int [Default: 2.0]
@@ -27,6 +29,25 @@
 #    worker_cpus: int [Default: 8.0]
 #    worker_memory_gb: int [Default: 16.0]
 components:
+  comp-download-model:
+    executorLabel: exec-download-model
+    inputDefinitions:
+      parameters:
+        model_cache_mount:
+          defaultValue: /mnt/models
+          description: Mount path for the model cache PVC.
+          isOptional: true
+          parameterType: STRING
+        model_cache_pvc:
+          description: Name of the PVC to store models (unused here, mounted via pipeline).
+          parameterType: STRING
+        model_name:
+          description: HuggingFace model ID (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
   comp-ingest-to-milvus:
     executorLabel: exec-ingest-to-milvus
     inputDefinitions:
@@ -95,9 +116,34 @@ components:
     executorLabel: exec-model-deployment
     inputDefinitions:
       parameters:
+        cpu_limits:
+          defaultValue: '2'
+          description: CPU limits for the predictor pod.
+          isOptional: true
+          parameterType: STRING
+        cpu_requests:
+          defaultValue: '2'
+          description: CPU requests for the predictor pod.
+          isOptional: true
+          parameterType: STRING
         gpu_count:
           defaultValue: 1.0
           description: Number of GPUs per replica.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        hardware_profile_name:
+          defaultValue: gpu-profile
+          description: HardwareProfile CR name for GPU resources.
+          isOptional: true
+          parameterType: STRING
+        hardware_profile_namespace:
+          defaultValue: redhat-ods-applications
+          description: Namespace of the HardwareProfile CR.
+          isOptional: true
+          parameterType: STRING
+        max_model_len:
+          defaultValue: 4096.0
+          description: Maximum context length (limits KV cache memory usage).
           isOptional: true
           parameterType: NUMBER_INTEGER
         max_replicas:
@@ -105,32 +151,33 @@ components:
           description: Maximum number of replicas.
           isOptional: true
           parameterType: NUMBER_INTEGER
+        memory_limits:
+          defaultValue: 4Gi
+          description: Memory limits for the predictor pod.
+          isOptional: true
+          parameterType: STRING
+        memory_requests:
+          defaultValue: 4Gi
+          description: Memory requests for the predictor pod.
+          isOptional: true
+          parameterType: STRING
         min_replicas:
           defaultValue: 1.0
           description: Minimum number of replicas.
           isOptional: true
           parameterType: NUMBER_INTEGER
-        model_name:
-          description: Name/path of the model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').
+        model_cache_pvc:
+          description: Name of the PVC containing cached model weights.
           parameterType: STRING
-        model_path:
-          defaultValue: ''
-          description: Optional PVC path to the model. If empty, the model is pulled
-            from HuggingFace.
-          isOptional: true
+        model_dir:
+          description: Sub-path on the PVC where model files are stored (output from
+            download_model).
+          parameterType: STRING
+        model_name:
+          description: HuggingFace model name (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').
           parameterType: STRING
         namespace:
-          description: Namespace to deploy the InferenceService.
-          parameterType: STRING
-        runtime:
-          defaultValue: vllm
-          description: 'Serving runtime to use (default: vllm).'
-          isOptional: true
-          parameterType: STRING
-        serving_runtime_name:
-          defaultValue: vllm-runtime
-          description: Name of the ServingRuntime CR.
-          isOptional: true
+          description: Namespace to deploy into.
           parameterType: STRING
     outputDefinitions:
       parameters:
@@ -161,7 +208,7 @@ components:
           isOptional: true
           parameterType: NUMBER_INTEGER
         head_memory_gb:
-          defaultValue: 4.0
+          defaultValue: 8.0
           description: Memory (GB) for the Ray head pod.
           isOptional: true
           parameterType: NUMBER_INTEGER
@@ -237,6 +284,57 @@ components:
           parameterType: STRING
 deploymentSpec:
   executors:
+    exec-download-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - download_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'huggingface_hub>=0.20.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef download_model(\n    model_name: str,\n    model_cache_pvc: str,\n\
+          \    model_cache_mount: str = \"/mnt/models\",\n) -> str:\n    \"\"\"Download\
+          \ a HuggingFace model to a PVC for caching.\n\n    If the model is already\
+          \ present on the PVC, skips the download.\n\n    Args:\n        model_name:\
+          \ HuggingFace model ID (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n  \
+          \      model_cache_pvc: Name of the PVC to store models (unused here, mounted\
+          \ via pipeline).\n        model_cache_mount: Mount path for the model cache\
+          \ PVC.\n\n    Returns:\n        The PVC sub-path where the model is stored.\n\
+          \    \"\"\"\n    import os\n\n    from huggingface_hub import snapshot_download\n\
+          \n    # Convert model name to a directory-safe path\n    # e.g. \"mistralai/Mistral-7B-Instruct-v0.3\"\
+          \ -> \"mistralai--Mistral-7B-Instruct-v0.3\"\n    model_dir_name = model_name.replace(\"\
+          /\", \"--\")\n    model_path = os.path.join(model_cache_mount, model_dir_name)\n\
+          \n    # Check if model is already cached\n    config_path = os.path.join(model_path,\
+          \ \"config.json\")\n    if os.path.exists(config_path):\n        file_count\
+          \ = sum(1 for _ in os.scandir(model_path) if _.is_file())\n        print(f\"\
+          Model '{model_name}' already cached at {model_path} ({file_count} files).\
+          \ Skipping download.\")\n        return model_dir_name\n\n    # Download\
+          \ the model snapshot\n    print(f\"Downloading model '{model_name}' to {model_path}...\"\
+          )\n    os.makedirs(model_path, exist_ok=True)\n\n    snapshot_download(\n\
+          \        repo_id=model_name,\n        local_dir=model_path,\n        local_dir_use_symlinks=False,\n\
+          \    )\n\n    file_count = sum(1 for _ in os.scandir(model_path) if _.is_file())\n\
+          \    print(f\"Model '{model_name}' downloaded to {model_path} ({file_count}\
+          \ files).\")\n    return model_dir_name\n\n"
+        image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
     exec-ingest-to-milvus:
       container:
         args:
@@ -383,55 +481,140 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef model_deployment(\n    model_name: str,\n    namespace: str,\n\
-          \    runtime: str = \"vllm\",\n    model_path: str = \"\",\n    serving_runtime_name:\
-          \ str = \"vllm-runtime\",\n    min_replicas: int = 1,\n    max_replicas:\
-          \ int = 1,\n    gpu_count: int = 1,\n) -> str:\n    \"\"\"Deploy a model\
-          \ on OpenShift AI using an InferenceService.\n\n    Args:\n        model_name:\
-          \ Name/path of the model (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n\
-          \        namespace: Namespace to deploy the InferenceService.\n        runtime:\
-          \ Serving runtime to use (default: vllm).\n        model_path: Optional\
-          \ PVC path to the model. If empty, the model is pulled from HuggingFace.\n\
-          \        serving_runtime_name: Name of the ServingRuntime CR.\n        min_replicas:\
-          \ Minimum number of replicas.\n        max_replicas: Maximum number of replicas.\n\
-          \        gpu_count: Number of GPUs per replica.\n\n    Returns:\n      \
-          \  The inference endpoint URL.\n    \"\"\"\n    import time\n\n    from\
-          \ kubernetes import client as kclient\n    from kubernetes import config\n\
-          \n    config.load_incluster_config()\n    custom_api = kclient.CustomObjectsApi()\n\
-          \n    isvc_name = model_name.split(\"/\")[-1].lower().replace(\".\", \"\
-          -\")\n\n    # Build the InferenceService spec\n    predictor_spec = {\n\
-          \        \"minReplicas\": min_replicas,\n        \"maxReplicas\": max_replicas,\n\
-          \        \"model\": {\n            \"modelFormat\": {\"name\": runtime},\n\
-          \            \"runtime\": serving_runtime_name,\n            \"resources\"\
-          : {\n                \"requests\": {\"cpu\": \"2\", \"memory\": \"8Gi\"\
-          },\n                \"limits\": {\"cpu\": \"4\", \"memory\": \"16Gi\"},\n\
-          \            },\n        },\n    }\n\n    if gpu_count > 0:\n        predictor_spec[\"\
-          model\"][\"resources\"][\"requests\"][\"nvidia.com/gpu\"] = str(gpu_count)\n\
-          \        predictor_spec[\"model\"][\"resources\"][\"limits\"][\"nvidia.com/gpu\"\
-          ] = str(gpu_count)\n\n    if model_path:\n        predictor_spec[\"model\"\
-          ][\"storageUri\"] = model_path\n    else:\n        predictor_spec[\"model\"\
-          ][\"storageUri\"] = f\"hf://{model_name}\"\n\n    isvc = {\n        \"apiVersion\"\
-          : \"serving.kserve.io/v1beta1\",\n        \"kind\": \"InferenceService\"\
-          ,\n        \"metadata\": {\n            \"name\": isvc_name,\n         \
-          \   \"namespace\": namespace,\n            \"annotations\": {\n        \
-          \        \"serving.kserve.io/deploymentMode\": \"RawDeployment\",\n    \
-          \        },\n        },\n        \"spec\": {\n            \"predictor\"\
-          : predictor_spec,\n        },\n    }\n\n    # Create or update the InferenceService\n\
+          \    model_dir: str,\n    model_cache_pvc: str,\n    hardware_profile_name:\
+          \ str = \"gpu-profile\",\n    hardware_profile_namespace: str = \"redhat-ods-applications\"\
+          ,\n    min_replicas: int = 1,\n    max_replicas: int = 1,\n    gpu_count:\
+          \ int = 1,\n    max_model_len: int = 4096,\n    cpu_requests: str = \"2\"\
+          ,\n    memory_requests: str = \"4Gi\",\n    cpu_limits: str = \"2\",\n \
+          \   memory_limits: str = \"4Gi\",\n) -> str:\n    \"\"\"Deploy a model on\
+          \ OpenShift AI using vLLM InferenceService.\n\n    Creates a vLLM NVIDIA\
+          \ GPU ServingRuntime and InferenceService\n    matching the RHOAI dashboard\
+          \ deployment pattern. Uses a PVC-cached\n    model to avoid re-downloading\
+          \ on every pod restart.\n\n    Args:\n        model_name: HuggingFace model\
+          \ name (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').\n        namespace:\
+          \ Namespace to deploy into.\n        model_dir: Sub-path on the PVC where\
+          \ model files are stored (output from download_model).\n        model_cache_pvc:\
+          \ Name of the PVC containing cached model weights.\n        hardware_profile_name:\
+          \ HardwareProfile CR name for GPU resources.\n        hardware_profile_namespace:\
+          \ Namespace of the HardwareProfile CR.\n        min_replicas: Minimum number\
+          \ of replicas.\n        max_replicas: Maximum number of replicas.\n    \
+          \    gpu_count: Number of GPUs per replica.\n        max_model_len: Maximum\
+          \ context length (limits KV cache memory usage).\n        cpu_requests:\
+          \ CPU requests for the predictor pod.\n        memory_requests: Memory requests\
+          \ for the predictor pod.\n        cpu_limits: CPU limits for the predictor\
+          \ pod.\n        memory_limits: Memory limits for the predictor pod.\n\n\
+          \    Returns:\n        The inference endpoint URL.\n    \"\"\"\n    import\
+          \ time\n\n    from kubernetes import client as kclient\n    from kubernetes\
+          \ import config\n\n    config.load_incluster_config()\n    custom_api =\
+          \ kclient.CustomObjectsApi()\n\n    isvc_name = model_name.split(\"/\")[-1].lower().replace(\"\
+          .\", \"-\")\n\n    # Look up the HardwareProfile resource version for the\
+          \ annotation\n    try:\n        hp = custom_api.get_namespaced_custom_object(\n\
+          \            group=\"infrastructure.opendatahub.io\",\n            version=\"\
+          v1\",\n            namespace=hardware_profile_namespace,\n            plural=\"\
+          hardwareprofiles\",\n            name=hardware_profile_name,\n        )\n\
+          \        hp_resource_version = hp[\"metadata\"][\"resourceVersion\"]\n \
+          \       print(f\"Found HardwareProfile '{hardware_profile_name}' (rv={hp_resource_version}).\"\
+          )\n    except kclient.rest.ApiException:\n        hp_resource_version =\
+          \ \"\"\n        print(f\"HardwareProfile '{hardware_profile_name}' not found,\
+          \ proceeding without it.\")\n\n    # --- Create ServingRuntime (vLLM NVIDIA\
+          \ GPU, matching RHOAI template) ---\n    serving_runtime_name = isvc_name\n\
+          \n    serving_runtime = {\n        \"apiVersion\": \"serving.kserve.io/v1alpha1\"\
+          ,\n        \"kind\": \"ServingRuntime\",\n        \"metadata\": {\n    \
+          \        \"name\": serving_runtime_name,\n            \"namespace\": namespace,\n\
+          \            \"annotations\": {\n                \"opendatahub.io/apiProtocol\"\
+          : \"REST\",\n                \"opendatahub.io/recommended-accelerators\"\
+          : '[\"nvidia.com/gpu\"]',\n                \"opendatahub.io/runtime-version\"\
+          : \"v0.11.2\",\n                \"opendatahub.io/serving-runtime-scope\"\
+          : \"global\",\n                \"opendatahub.io/template-display-name\"\
+          : \"vLLM NVIDIA GPU ServingRuntime for KServe\",\n                \"opendatahub.io/template-name\"\
+          : \"vllm-cuda-runtime-template\",\n                \"openshift.io/display-name\"\
+          : \"vLLM NVIDIA GPU ServingRuntime for KServe\",\n            },\n     \
+          \       \"labels\": {\n                \"opendatahub.io/dashboard\": \"\
+          true\",\n            },\n        },\n        \"spec\": {\n            \"\
+          annotations\": {\n                \"opendatahub.io/kserve-runtime\": \"\
+          vllm\",\n                \"prometheus.io/path\": \"/metrics\",\n       \
+          \         \"prometheus.io/port\": \"8080\",\n            },\n          \
+          \  \"multiModel\": False,\n            \"supportedModelFormats\": [\n  \
+          \              {\n                    \"name\": \"vLLM\",\n            \
+          \        \"autoSelect\": True,\n                },\n            ],\n   \
+          \         \"containers\": [\n                {\n                    \"name\"\
+          : \"kserve-container\",\n                    \"image\": \"registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a\"\
+          ,\n                    \"command\": [\"python\", \"-m\", \"vllm.entrypoints.openai.api_server\"\
+          ],\n                    \"args\": [\n                        \"--port=8080\"\
+          ,\n                        \"--model=/mnt/models\",\n                  \
+          \      \"--served-model-name={{.Name}}\",\n                        f\"--max-model-len={max_model_len}\"\
+          ,\n                    ],\n                    \"env\": [\n            \
+          \            {\"name\": \"HF_HOME\", \"value\": \"/tmp/hf_home\"},\n   \
+          \                 ],\n                    \"ports\": [\n               \
+          \         {\"containerPort\": 8080, \"protocol\": \"TCP\"},\n          \
+          \          ],\n                },\n            ],\n        },\n    }\n\n\
           \    try:\n        custom_api.get_namespaced_custom_object(\n          \
-          \  group=\"serving.kserve.io\",\n            version=\"v1beta1\",\n    \
-          \        namespace=namespace,\n            plural=\"inferenceservices\"\
-          ,\n            name=isvc_name,\n        )\n        custom_api.patch_namespaced_custom_object(\n\
+          \  group=\"serving.kserve.io\",\n            version=\"v1alpha1\",\n   \
+          \         namespace=namespace,\n            plural=\"servingruntimes\",\n\
+          \            name=serving_runtime_name,\n        )\n        # Replace to\
+          \ ensure args (like --max-model-len) are up to date\n        custom_api.patch_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1alpha1\"\
+          ,\n            namespace=namespace,\n            plural=\"servingruntimes\"\
+          ,\n            name=serving_runtime_name,\n            body=serving_runtime,\n\
+          \        )\n        print(f\"ServingRuntime '{serving_runtime_name}' updated.\"\
+          )\n    except kclient.rest.ApiException as e:\n        if e.status == 404:\n\
+          \            custom_api.create_namespaced_custom_object(\n             \
+          \   group=\"serving.kserve.io\",\n                version=\"v1alpha1\",\n\
+          \                namespace=namespace,\n                plural=\"servingruntimes\"\
+          ,\n                body=serving_runtime,\n            )\n            print(f\"\
+          Created ServingRuntime '{serving_runtime_name}'.\")\n        else:\n   \
+          \         raise\n\n    # --- Create or update InferenceService ---\n   \
+          \ resources = {\n        \"requests\": {\"cpu\": cpu_requests, \"memory\"\
+          : memory_requests},\n        \"limits\": {\"cpu\": cpu_limits, \"memory\"\
+          : memory_limits},\n    }\n    if gpu_count > 0:\n        resources[\"requests\"\
+          ][\"nvidia.com/gpu\"] = str(gpu_count)\n        resources[\"limits\"][\"\
+          nvidia.com/gpu\"] = str(gpu_count)\n\n    isvc_annotations = {\n       \
+          \ \"serving.kserve.io/deploymentMode\": \"RawDeployment\",\n        \"security.opendatahub.io/enable-auth\"\
+          : \"false\",\n        \"opendatahub.io/hardware-profile-name\": hardware_profile_name,\n\
+          \        \"opendatahub.io/hardware-profile-namespace\": hardware_profile_namespace,\n\
+          \        \"opendatahub.io/model-type\": \"generative\",\n        \"opendatahub.io/genai-use-case\"\
+          : \"ray-rag\",\n        \"openshift.io/display-name\": isvc_name,\n    }\n\
+          \    if hp_resource_version:\n        isvc_annotations[\"opendatahub.io/hardware-profile-resource-version\"\
+          ] = hp_resource_version\n\n    isvc = {\n        \"apiVersion\": \"serving.kserve.io/v1beta1\"\
+          ,\n        \"kind\": \"InferenceService\",\n        \"metadata\": {\n  \
+          \          \"name\": isvc_name,\n            \"namespace\": namespace,\n\
+          \            \"annotations\": isvc_annotations,\n            \"labels\"\
+          : {\n                \"opendatahub.io/dashboard\": \"true\",\n         \
+          \       \"opendatahub.io/genai-asset\": \"true\",\n            },\n    \
+          \    },\n        \"spec\": {\n            \"predictor\": {\n           \
+          \     \"minReplicas\": min_replicas,\n                \"maxReplicas\": max_replicas,\n\
+          \                \"automountServiceAccountToken\": False,\n            \
+          \    \"deploymentStrategy\": {\"type\": \"RollingUpdate\"},\n          \
+          \      \"model\": {\n                    \"modelFormat\": {\"name\": \"\
+          vLLM\"},\n                    \"name\": \"\",\n                    \"runtime\"\
+          : serving_runtime_name,\n                    \"storageUri\": f\"pvc://{model_cache_pvc}/{model_dir}\"\
+          ,\n                    \"resources\": resources,\n                },\n \
+          \           },\n        },\n    }\n\n    # Delete existing InferenceService\
+          \ if present to avoid stuck rolling updates\n    try:\n        custom_api.get_namespaced_custom_object(\n\
           \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
           ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
-          ,\n            name=isvc_name,\n            body=isvc,\n        )\n    \
-          \    print(f\"InferenceService '{isvc_name}' updated.\")\n    except kclient.rest.ApiException\
-          \ as e:\n        if e.status == 404:\n            custom_api.create_namespaced_custom_object(\n\
-          \                group=\"serving.kserve.io\",\n                version=\"\
-          v1beta1\",\n                namespace=namespace,\n                plural=\"\
-          inferenceservices\",\n                body=isvc,\n            )\n      \
-          \      print(f\"InferenceService '{isvc_name}' created.\")\n        else:\n\
-          \            raise\n\n    # Wait for the InferenceService to become ready\n\
-          \    print(\"Waiting for InferenceService to become ready...\")\n    for\
-          \ attempt in range(60):\n        time.sleep(30)\n        obj = custom_api.get_namespaced_custom_object(\n\
+          ,\n            name=isvc_name,\n        )\n        custom_api.delete_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        print(f\"Deleted existing\
+          \ InferenceService '{isvc_name}'. Waiting for cleanup...\")\n        # Wait\
+          \ for old pods to terminate and release GPU\n        for _ in range(24):\n\
+          \            time.sleep(5)\n            try:\n                custom_api.get_namespaced_custom_object(\n\
+          \                    group=\"serving.kserve.io\",\n                    version=\"\
+          v1beta1\",\n                    namespace=namespace,\n                 \
+          \   plural=\"inferenceservices\",\n                    name=isvc_name,\n\
+          \                )\n            except kclient.rest.ApiException as del_e:\n\
+          \                if del_e.status == 404:\n                    print(\"Old\
+          \ InferenceService fully deleted.\")\n                    break\n      \
+          \  else:\n            print(\"Warning: old InferenceService still deleting,\
+          \ proceeding anyway.\")\n    except kclient.rest.ApiException as e:\n  \
+          \      if e.status != 404:\n            raise\n\n    # Create fresh InferenceService\n\
+          \    custom_api.create_namespaced_custom_object(\n        group=\"serving.kserve.io\"\
+          ,\n        version=\"v1beta1\",\n        namespace=namespace,\n        plural=\"\
+          inferenceservices\",\n        body=isvc,\n    )\n    print(f\"InferenceService\
+          \ '{isvc_name}' created.\")\n\n    # Wait for the InferenceService to become\
+          \ ready\n    print(\"Waiting for InferenceService to become ready...\")\n\
+          \    for attempt in range(60):\n        time.sleep(30)\n        obj = custom_api.get_namespaced_custom_object(\n\
           \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
           ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
           ,\n            name=isvc_name,\n        )\n        conditions = obj.get(\"\
@@ -476,7 +659,7 @@ deploymentSpec:
           \ str = \"sentence-transformers/all-MiniLM-L6-v2\",\n    chunk_max_tokens:\
           \ int = 256,\n    num_workers: int = 2,\n    worker_cpus: int = 8,\n   \
           \ worker_memory_gb: int = 16,\n    head_cpus: int = 2,\n    head_memory_gb:\
-          \ int = 4,\n    cpus_per_actor: int = 4,\n    min_actors: int = 2,\n   \
+          \ int = 8,\n    cpus_per_actor: int = 4,\n    min_actors: int = 2,\n   \
           \ max_actors: int = 4,\n    batch_size: int = 4,\n    num_files: int = 0,\n\
           \    timeout_seconds: int = 600,\n) -> str:\n    \"\"\"Parse PDFs and write\
           \ chunked JSONL files to S3.\n\n    Args:\n        pvc_name: Name of the\
@@ -683,23 +866,24 @@ deploymentSpec:
           \ import ManagedClusterConfig, RayJob\n    from kubernetes.client import\
           \ (\n        V1PersistentVolumeClaimVolumeSource,\n        V1Volume,\n \
           \       V1VolumeMount,\n    )\n    from ray.runtime_env import RuntimeEnv\n\
-          \n    rayjob_name = f\"docling-chunk-{int(time.time())}\"\n    schedulable_cpus\
-          \ = worker_cpus - 2\n\n    # Encode entrypoint script as base64 env var\
-          \ to avoid creating\n    # Secrets or ConfigMaps (service account lacks\
-          \ permissions for both).\n    script_b64 = base64.b64encode(\n        _DOCLING_CHUNK_PROCESS_PY.encode()\n\
-          \    ).decode()\n\n    shared_mount = V1VolumeMount(pvc_mount_path, name=\"\
-          shared-data\", read_only=True)\n    data_volume = V1Volume(\n        name=\"\
-          shared-data\",\n        persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(\n\
-          \            claim_name=pvc_name, read_only=True,\n        ),\n    )\n\n\
-          \    cluster_config = ManagedClusterConfig(\n        head_cpu_requests=head_cpus,\n\
-          \        head_cpu_limits=head_cpus,\n        head_memory_requests=head_memory_gb,\n\
+          \n    rayjob_name = f\"docling-chunk-{int(time.time())}\"\n\n    # Encode\
+          \ entrypoint script as base64 env var to avoid creating\n    # Secrets or\
+          \ ConfigMaps (service account lacks permissions for both).\n    script_b64\
+          \ = base64.b64encode(\n        _DOCLING_CHUNK_PROCESS_PY.encode()\n    ).decode()\n\
+          \n    shared_mount = V1VolumeMount(pvc_mount_path, name=\"shared-data\"\
+          )\n    data_volume = V1Volume(\n        name=\"shared-data\",\n        persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(\n\
+          \            claim_name=pvc_name,\n        ),\n    )\n\n    cluster_config\
+          \ = ManagedClusterConfig(\n        head_cpu_requests=head_cpus,\n      \
+          \  head_cpu_limits=head_cpus,\n        head_memory_requests=head_memory_gb,\n\
           \        head_memory_limits=head_memory_gb,\n        num_workers=num_workers,\n\
           \        worker_cpu_requests=worker_cpus,\n        worker_cpu_limits=worker_cpus,\n\
           \        worker_memory_requests=worker_memory_gb,\n        worker_memory_limits=worker_memory_gb,\n\
           \        volume_mounts=[shared_mount],\n        volumes=[data_volume],\n\
           \        image=ray_image,\n        envs={\n            \"RAY_DEFAULT_OBJECT_STORE_MEMORY_PROPORTION\"\
-          : \"0.1\",\n        },\n    )\n\n    job = RayJob(\n        job_name=rayjob_name,\n\
-          \        entrypoint=\"python -c \\\"import base64,os;exec(base64.b64decode(os.environ['ENTRYPOINT_SCRIPT']).decode())\\\
+          : \"0.1\",\n            \"RAY_OBJECT_STORE_MEMORY\": \"78643200\",\n   \
+          \         \"HF_HOME\": f\"{pvc_mount_path}/.hf_cache\",\n        },\n  \
+          \  )\n\n    job = RayJob(\n        job_name=rayjob_name,\n        entrypoint=\"\
+          python -c \\\"import base64,os;exec(base64.b64decode(os.environ['ENTRYPOINT_SCRIPT']).decode())\\\
           \"\",\n        cluster_config=cluster_config,\n        namespace=namespace,\n\
           \        runtime_env=RuntimeEnv(\n            pip=[\n                \"\
           opencv-python-headless\",\n                \"pypdfium2\",\n            \
@@ -728,44 +912,39 @@ deploymentSpec:
           , \"patch\", \"rayjob\", rayjob_name,\n            \"-n\", namespace,\n\
           \            \"--type\", \"merge\",\n            \"-p\", json.dumps({\"\
           spec\": {\"suspend\": False}}),\n        ],\n        check=True,\n    )\n\
-          \    print(f\"Unsuspended RayJob '{rayjob_name}'.\")\n\n    # Wait for the\
-          \ RayCluster to be created by the RayJob controller,\n    # then patch it\
-          \ directly (the controller ignores RayJob spec changes).\n    print(\"Waiting\
-          \ for RayCluster to be created...\")\n    raycluster_name = \"\"\n    for\
-          \ _ in range(60):\n        result = subprocess.run(\n            [\n   \
-          \             \"oc\", \"get\", \"rayjob\", rayjob_name,\n              \
-          \  \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.rayClusterName}\"\
-          ,\n            ],\n            capture_output=True, text=True,\n       \
-          \ )\n        raycluster_name = result.stdout.strip()\n        if raycluster_name:\n\
-          \            break\n        time.sleep(5)\n    if not raycluster_name:\n\
-          \        raise RuntimeError(f\"RayCluster was not created for RayJob '{rayjob_name}'.\"\
-          )\n    print(f\"Found RayCluster '{raycluster_name}', patching num-cpus...\"\
-          )\n\n    # Patch head num-cpus=0 so no actors run on head\n    patch = [\n\
-          \        {\n            \"op\": \"add\",\n            \"path\": \"/spec/headGroupSpec/rayStartParams/num-cpus\"\
-          ,\n            \"value\": \"0\",\n        },\n        {\n            \"\
-          op\": \"add\",\n            \"path\": \"/spec/workerGroupSpecs/0/rayStartParams/num-cpus\"\
-          ,\n            \"value\": str(schedulable_cpus),\n        },\n    ]\n  \
-          \  subprocess.run(\n        [\n            \"oc\", \"patch\", \"raycluster\"\
-          , raycluster_name,\n            \"-n\", namespace,\n            \"--type\"\
-          , \"json\",\n            \"-p\", json.dumps(patch),\n        ],\n      \
-          \  check=True,\n    )\n\n    # Wait for job completion\n    print(\"Waiting\
-          \ for RayJob to complete...\")\n    while True:\n        result = subprocess.run(\n\
-          \            [\n                \"oc\", \"get\", \"rayjob\", rayjob_name,\n\
-          \                \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.jobStatus}\"\
-          ,\n            ],\n            capture_output=True, text=True,\n       \
-          \ )\n        status = result.stdout.strip()\n        if status == \"SUCCEEDED\"\
-          :\n            print(\"RayJob completed successfully.\")\n            break\n\
-          \        elif status == \"FAILED\":\n            raise RuntimeError(f\"\
-          RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return\
-          \ f\"s3://{s3_bucket}/{s3_prefix}\"\n\n"
+          \    print(f\"Unsuspended RayJob '{rayjob_name}'.\")\n\n    # Wait for job\
+          \ completion\n    print(\"Waiting for RayJob to complete...\")\n    while\
+          \ True:\n        result = subprocess.run(\n            [\n             \
+          \   \"oc\", \"get\", \"rayjob\", rayjob_name,\n                \"-n\", namespace,\n\
+          \                \"-o\", \"jsonpath={.status.jobStatus}\",\n           \
+          \ ],\n            capture_output=True, text=True,\n        )\n        status\
+          \ = result.stdout.strip()\n        if status == \"SUCCEEDED\":\n       \
+          \     print(\"RayJob completed successfully.\")\n            break\n   \
+          \     elif status == \"FAILED\":\n            raise RuntimeError(f\"RayJob\
+          \ '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return f\"s3://{s3_bucket}/{s3_prefix}\"\
+          \n\n"
         image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
 pipelineInfo:
   description: 'Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to
-    S3), ingest into Milvus with local embeddings, and deploy an LLM for inference.'
+    S3), ingest into Milvus with local embeddings, download and deploy an LLM for
+    inference (cached on PVC).'
   name: rag-multi-step-pipeline
 root:
   dag:
     tasks:
+      download-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-download-model
+        inputs:
+          parameters:
+            model_cache_pvc:
+              componentInputParameter: model_cache_pvc
+            model_name:
+              componentInputParameter: llm_model_name
+        taskInfo:
+          name: download-model
       ingest-to-milvus:
         cachingOptions:
           enableCache: true
@@ -799,11 +978,20 @@ root:
         componentRef:
           name: comp-model-deployment
         dependentTasks:
+        - download-model
         - ingest-to-milvus
         inputs:
           parameters:
             gpu_count:
               componentInputParameter: gpu_count
+            max_model_len:
+              componentInputParameter: max_model_len
+            model_cache_pvc:
+              componentInputParameter: model_cache_pvc
+            model_dir:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: download-model
             model_name:
               componentInputParameter: llm_model_name
             namespace:
@@ -891,6 +1079,10 @@ root:
         defaultValue: 4.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      max_model_len:
+        defaultValue: 4096.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
       milvus_host:
         defaultValue: milvus-milvus.milvus.svc.cluster.local
         isOptional: true
@@ -903,6 +1095,10 @@ root:
         defaultValue: 2.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      model_cache_pvc:
+        defaultValue: model-cache-pvc
+        isOptional: true
+        parameterType: STRING
       namespace:
         defaultValue: ray-docling
         isOptional: true
@@ -958,6 +1154,12 @@ platforms:
   kubernetes:
     deploymentSpec:
       executors:
+        exec-download-model:
+          pvcMount:
+          - componentInputParameter: model_cache_pvc
+            mountPath: /mnt/models
+            pvcNameParameter:
+              componentInputParameter: model_cache_pvc
         exec-ingest-to-milvus:
           secretAsEnv:
           - keyToEnv:

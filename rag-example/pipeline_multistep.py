@@ -1,12 +1,14 @@
 """KFP Pipeline: Multi-Step RAG Document Processing.
 
-Orchestrates three reusable components:
+Orchestrates four reusable components:
 1. Parse & chunk PDFs (Docling + HybridChunker via RayJob -> S3)
 2. Ingest into Milvus (read chunks from S3, embed locally, insert)
-3. Deploy LLM for RAG inference (vLLM InferenceService)
+3. Download LLM to PVC (cached — skips if already present)
+4. Deploy LLM for RAG inference (vLLM InferenceService from PVC)
 
 Intermediate chunks are stored in S3 (MinIO), not on the PVC.
-The PVC is mounted read-only for input PDFs.
+The data PVC is mounted read-only for input PDFs.
+The model cache PVC stores downloaded HuggingFace models.
 Embedding uses a local sentence-transformers model (no TEI runtime needed).
 S3 credentials are read from a Kubernetes Secret (not pipeline parameters).
 """
@@ -14,6 +16,7 @@ S3 credentials are read from a Kubernetes Secret (not pipeline parameters).
 from kfp import dsl
 from kfp import kubernetes
 
+from components.download_model.component import download_model
 from components.ingest_to_milvus.component import ingest_to_milvus
 from components.model_deployment.component import model_deployment
 from components.parse_and_chunk.component import parse_and_chunk
@@ -24,7 +27,7 @@ from components.parse_and_chunk.component import parse_and_chunk
     description=(
         "Multi-step RAG pipeline: parse & chunk PDFs with Docling "
         "(output to S3), ingest into Milvus with local embeddings, "
-        "and deploy an LLM for inference."
+        "download and deploy an LLM for inference (cached on PVC)."
     ),
 )
 def rag_multistep_pipeline(
@@ -57,6 +60,8 @@ def rag_multistep_pipeline(
     collection_name: str = "rag_documents",
     # LLM deployment
     llm_model_name: str = "mistralai/Mistral-7B-Instruct-v0.3",
+    model_cache_pvc: str = "model-cache-pvc",
+    max_model_len: int = 4096,
     gpu_count: int = 1,
 ):
     # Step 1: Parse & chunk PDFs -> S3
@@ -109,10 +114,24 @@ def rag_multistep_pipeline(
     )
     ingest_task.after(chunk_task)
 
-    # Step 3: Deploy LLM for RAG inference
+    # Step 3: Download LLM to PVC (skips if already cached)
+    download_task = download_model(
+        model_name=llm_model_name,
+        model_cache_pvc=model_cache_pvc,
+    )
+    kubernetes.mount_pvc(
+        download_task,
+        pvc_name=model_cache_pvc,
+        mount_path="/mnt/models",
+    )
+
+    # Step 4: Deploy LLM for RAG inference (from PVC cache)
     deploy_task = model_deployment(
         model_name=llm_model_name,
         namespace=namespace,
+        model_dir=download_task.output,
+        model_cache_pvc=model_cache_pvc,
+        max_model_len=max_model_len,
         gpu_count=gpu_count,
     )
     deploy_task.after(ingest_task)

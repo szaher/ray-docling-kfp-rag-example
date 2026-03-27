@@ -34,10 +34,10 @@ rules:
     resources: ["inferenceservices"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 
-  # ServingRuntime (read-only, to verify it exists)
+  # ServingRuntime management (created per model deployment)
   - apiGroups: ["serving.kserve.io"]
     resources: ["servingruntimes"]
-    verbs: ["get", "list"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
 
   # Secrets — codeflare-sdk creates a Secret to store the zipped
   # working directory (entrypoint script) for the RayJob
@@ -76,6 +76,35 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: pipeline-rag-role
+
+---
+# ClusterRole to read HardwareProfiles (cluster-scoped resource
+# in redhat-ods-applications namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipeline-hardwareprofile-reader
+rules:
+  - apiGroups: ["infrastructure.opendatahub.io"]
+    resources: ["hardwareprofiles"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pipeline-hardwareprofile-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-runner-dspa
+    namespace: ray-docling
+  - kind: ServiceAccount
+    name: ds-pipeline-dspa
+    namespace: ray-docling
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pipeline-hardwareprofile-reader
 
 ---
 # If the parse_and_chunk component uses `oc patch` via subprocess

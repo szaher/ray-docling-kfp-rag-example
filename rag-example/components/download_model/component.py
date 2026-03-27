@@ -1,0 +1,69 @@
+"""KFP component: Download a HuggingFace model to a PVC for caching.
+
+Downloads the model once to a PVC path. On subsequent runs, detects the
+model is already cached and skips the download. This avoids re-downloading
+14GB+ model weights every time the InferenceService pod restarts.
+"""
+
+from kfp import dsl
+
+
+@dsl.component(
+    base_image="registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc",
+    packages_to_install=["huggingface_hub>=0.20.0"],
+)
+def download_model(
+    model_name: str,
+    model_cache_pvc: str,
+    model_cache_mount: str = "/mnt/models",
+) -> str:
+    """Download a HuggingFace model to a PVC for caching.
+
+    If the model is already present on the PVC, skips the download.
+
+    Args:
+        model_name: HuggingFace model ID (e.g. 'mistralai/Mistral-7B-Instruct-v0.3').
+        model_cache_pvc: Name of the PVC to store models (unused here, mounted via pipeline).
+        model_cache_mount: Mount path for the model cache PVC.
+
+    Returns:
+        The PVC sub-path where the model is stored.
+    """
+    import os
+
+    from huggingface_hub import snapshot_download
+
+    # Convert model name to a directory-safe path
+    # e.g. "mistralai/Mistral-7B-Instruct-v0.3" -> "mistralai--Mistral-7B-Instruct-v0.3"
+    model_dir_name = model_name.replace("/", "--")
+    model_path = os.path.join(model_cache_mount, model_dir_name)
+
+    # Check if model is already cached
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        file_count = sum(1 for _ in os.scandir(model_path) if _.is_file())
+        print(f"Model '{model_name}' already cached at {model_path} ({file_count} files). Skipping download.")
+        return model_dir_name
+
+    # Download the model snapshot
+    print(f"Downloading model '{model_name}' to {model_path}...")
+    os.makedirs(model_path, exist_ok=True)
+
+    snapshot_download(
+        repo_id=model_name,
+        local_dir=model_path,
+        local_dir_use_symlinks=False,
+    )
+
+    file_count = sum(1 for _ in os.scandir(model_path) if _.is_file())
+    print(f"Model '{model_name}' downloaded to {model_path} ({file_count} files).")
+    return model_dir_name
+
+
+if __name__ == "__main__":
+    from kfp import compiler
+
+    compiler.Compiler().compile(
+        download_model,
+        package_path=__file__.replace(".py", "_component.yaml"),
+    )

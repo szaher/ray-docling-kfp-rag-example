@@ -1,0 +1,17 @@
+---
+# PVC for caching downloaded HuggingFace model weights.
+# Mistral-7B needs ~15Gi. Adjust size for larger models.
+#
+# Usage:
+#   oc apply -f model-cache-pvc.yaml -n ray-docling
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+  namespace: ray-docling
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
