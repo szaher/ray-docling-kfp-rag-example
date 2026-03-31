@@ -134,7 +134,10 @@ def rag_multistep_pipeline(
         max_model_len=max_model_len,
         gpu_count=gpu_count,
     )
-    deploy_task.after(ingest_task)
+    # No dependency on ingest_task — model deployment runs in parallel
+    # with the data pipeline (parse → ingest). Both chains are independent:
+    #   Data chain:  parse_and_chunk → ingest_to_milvus
+    #   Model chain: download_model  → model_deployment
 
 
 if __name__ == "__main__":
