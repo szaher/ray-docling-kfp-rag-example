@@ -467,6 +467,46 @@ def parse_and_chunk(
     )
     print(f"Removed kueue.x-k8s.io/queue-name label from RayJob '{rayjob_name}'.")
 
+    # Wait for Ray cluster to be fully ready before unsuspending
+    print(f"Waiting for Ray cluster to be ready with {num_workers} workers...")
+    max_wait = 600  # 10 minutes
+    start_time = time.time()
+    while True:
+        result = subprocess.run(
+            [
+                "oc", "get", "rayjob", rayjob_name,
+                "-n", namespace,
+                "-o", "jsonpath={.status.rayClusterStatus.readyWorkerReplicas}",
+            ],
+            capture_output=True, text=True,
+        )
+        ready_workers = result.stdout.strip()
+
+        # Also check if cluster is in ready state
+        result2 = subprocess.run(
+            [
+                "oc", "get", "rayjob", rayjob_name,
+                "-n", namespace,
+                "-o", "jsonpath={.status.rayClusterStatus.state}",
+            ],
+            capture_output=True, text=True,
+        )
+        cluster_state = result2.stdout.strip()
+
+        if ready_workers == str(num_workers) and cluster_state == "ready":
+            print(f"Ray cluster ready: {ready_workers}/{num_workers} workers ready, state={cluster_state}")
+            break
+
+        elapsed = time.time() - start_time
+        if elapsed > max_wait:
+            raise TimeoutError(
+                f"Ray cluster did not become ready within {max_wait}s. "
+                f"Ready workers: {ready_workers}/{num_workers}, state: {cluster_state}"
+            )
+
+        print(f"  Waiting for cluster... ready workers: {ready_workers}/{num_workers}, state: {cluster_state} ({elapsed:.0f}s)")
+        time.sleep(10)
+
     # Unsuspend the RayJob so it starts running
     subprocess.run(
         [
