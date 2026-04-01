@@ -108,7 +108,7 @@ def ingest_to_milvus(
                 name="source_file", dtype=DataType.VARCHAR, max_length=512
             ),
             FieldSchema(name="chunk_index", dtype=DataType.INT64),
-            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=8192),
+            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=32768),
             FieldSchema(
                 name="embedding",
                 dtype=DataType.FLOAT_VECTOR,

@@ -1,12 +1,20 @@
 # PIPELINE DEFINITION
-# Name: rag-multi-step-pipeline
-# Description: Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to S3), ingest into Milvus with local embeddings, download and deploy an LLM for inference (cached on PVC).
+# Name: rag-multi-step-pipeline-kserve-embeddings
+# Description: Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to S3), deploy embedding model via KServe, ingest into Milvus with remote embeddings, download and deploy an LLM for inference.
 # Inputs:
 #    chunk_max_tokens: int [Default: 256.0]
 #    collection_name: str [Default: 'rag_documents']
 #    cpus_per_actor: int [Default: 4.0]
+#    embed_batch_size: int [Default: 64.0]
+#    embedding_cpu_limits: str [Default: '4']
+#    embedding_cpu_requests: str [Default: '2']
 #    embedding_dim: int [Default: 384.0]
+#    embedding_max_replicas: int [Default: 3.0]
+#    embedding_memory_limits: str [Default: '8Gi']
+#    embedding_memory_requests: str [Default: '4Gi']
+#    embedding_min_replicas: int [Default: 1.0]
 #    embedding_model: str [Default: 'sentence-transformers/all-MiniLM-L6-v2']
+#    embedding_serving_runtime: str [Default: 'embedding-runtime']
 #    gpu_count: int [Default: 1.0]
 #    input_path: str [Default: 'input/pdfs']
 #    llm_model_name: str [Default: 'mistralai/Mistral-7B-Instruct-v0.3']
@@ -29,6 +37,55 @@
 #    worker_cpus: int [Default: 8.0]
 #    worker_memory_gb: int [Default: 16.0]
 components:
+  comp-deploy-embedding-model:
+    executorLabel: exec-deploy-embedding-model
+    inputDefinitions:
+      parameters:
+        cpu_limits:
+          defaultValue: '4'
+          description: CPU limits per replica.
+          isOptional: true
+          parameterType: STRING
+        cpu_requests:
+          defaultValue: '2'
+          description: CPU requests per replica.
+          isOptional: true
+          parameterType: STRING
+        max_replicas:
+          defaultValue: 1.0
+          description: Maximum number of replicas.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        memory_limits:
+          defaultValue: 8Gi
+          description: Memory limits per replica.
+          isOptional: true
+          parameterType: STRING
+        memory_requests:
+          defaultValue: 4Gi
+          description: Memory requests per replica.
+          isOptional: true
+          parameterType: STRING
+        min_replicas:
+          defaultValue: 1.0
+          description: Minimum number of replicas.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        model_name:
+          description: HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').
+          parameterType: STRING
+        namespace:
+          description: Namespace to deploy the InferenceService.
+          parameterType: STRING
+        serving_runtime_name:
+          defaultValue: embedding-runtime
+          description: Name of the embedding ServingRuntime CR.
+          isOptional: true
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
   comp-download-model:
     executorLabel: exec-download-model
     inputDefinitions:
@@ -284,6 +341,94 @@ components:
           parameterType: STRING
 deploymentSpec:
   executors:
+    exec-deploy-embedding-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_embedding_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kubernetes>=28.1.0'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_embedding_model(\n    model_name: str,\n    namespace:\
+          \ str,\n    serving_runtime_name: str = \"embedding-runtime\",\n    min_replicas:\
+          \ int = 1,\n    max_replicas: int = 1,\n    cpu_requests: str = \"2\",\n\
+          \    cpu_limits: str = \"4\",\n    memory_requests: str = \"4Gi\",\n   \
+          \ memory_limits: str = \"8Gi\",\n) -> str:\n    \"\"\"Deploy a text embedding\
+          \ model using KServe InferenceService.\n\n    Args:\n        model_name:\
+          \ HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').\n\
+          \        namespace: Namespace to deploy the InferenceService.\n        serving_runtime_name:\
+          \ Name of the embedding ServingRuntime CR.\n        min_replicas: Minimum\
+          \ number of replicas.\n        max_replicas: Maximum number of replicas.\n\
+          \        cpu_requests: CPU requests per replica.\n        cpu_limits: CPU\
+          \ limits per replica.\n        memory_requests: Memory requests per replica.\n\
+          \        memory_limits: Memory limits per replica.\n\n    Returns:\n   \
+          \     The embedding service endpoint URL.\n    \"\"\"\n    import time\n\
+          \n    from kubernetes import client as kclient\n    from kubernetes import\
+          \ config\n\n    config.load_incluster_config()\n    custom_api = kclient.CustomObjectsApi()\n\
+          \n    # Derive InferenceService name from model name\n    isvc_name = model_name.split(\"\
+          /\")[-1].lower().replace(\"_\", \"-\").replace(\".\", \"-\")\n\n    isvc\
+          \ = {\n        \"apiVersion\": \"serving.kserve.io/v1beta1\",\n        \"\
+          kind\": \"InferenceService\",\n        \"metadata\": {\n            \"name\"\
+          : isvc_name,\n            \"namespace\": namespace,\n            \"annotations\"\
+          : {\n                \"serving.kserve.io/deploymentMode\": \"RawDeployment\"\
+          ,\n            },\n        },\n        \"spec\": {\n            \"predictor\"\
+          : {\n                \"minReplicas\": min_replicas,\n                \"\
+          maxReplicas\": max_replicas,\n                \"model\": {\n           \
+          \         \"modelFormat\": {\"name\": \"embedding\"},\n                \
+          \    \"runtime\": serving_runtime_name,\n                    \"storageUri\"\
+          : f\"hf://{model_name}\",\n                    \"resources\": {\n      \
+          \                  \"requests\": {\n                            \"cpu\"\
+          : cpu_requests,\n                            \"memory\": memory_requests,\n\
+          \                        },\n                        \"limits\": {\n   \
+          \                         \"cpu\": cpu_limits,\n                       \
+          \     \"memory\": memory_limits,\n                        },\n         \
+          \           },\n                },\n            },\n        },\n    }\n\n\
+          \    # Create or update\n    try:\n        custom_api.get_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        custom_api.patch_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n            body=isvc,\n        )\n    \
+          \    print(f\"InferenceService '{isvc_name}' updated.\")\n    except kclient.rest.ApiException\
+          \ as e:\n        if e.status == 404:\n            custom_api.create_namespaced_custom_object(\n\
+          \                group=\"serving.kserve.io\",\n                version=\"\
+          v1beta1\",\n                namespace=namespace,\n                plural=\"\
+          inferenceservices\",\n                body=isvc,\n            )\n      \
+          \      print(f\"InferenceService '{isvc_name}' created.\")\n        else:\n\
+          \            raise\n\n    # Wait for Ready\n    print(\"Waiting for embedding\
+          \ InferenceService to become ready...\")\n    for _ in range(60):\n    \
+          \    time.sleep(15)\n        obj = custom_api.get_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\",\n            version=\"v1beta1\"\
+          ,\n            namespace=namespace,\n            plural=\"inferenceservices\"\
+          ,\n            name=isvc_name,\n        )\n        conditions = obj.get(\"\
+          status\", {}).get(\"conditions\", [])\n        ready = any(\n          \
+          \  c.get(\"type\") == \"Ready\" and c.get(\"status\") == \"True\"\n    \
+          \        for c in conditions\n        )\n        if ready:\n           \
+          \ url = obj.get(\"status\", {}).get(\"url\", \"\")\n            print(f\"\
+          Embedding InferenceService ready: {url}\")\n            return url\n\n \
+          \   raise TimeoutError(\n        f\"Embedding InferenceService '{isvc_name}'\
+          \ did not become ready \"\n        \"within 15 minutes.\"\n    )\n\n"
+        image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
     exec-download-model:
       container:
         args:
@@ -930,12 +1075,39 @@ deploymentSpec:
         image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
 pipelineInfo:
   description: 'Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to
-    S3), ingest into Milvus with local embeddings, download and deploy an LLM for
-    inference (cached on PVC).'
-  name: rag-multi-step-pipeline
+    S3), deploy embedding model via KServe, ingest into Milvus with remote embeddings,
+    download and deploy an LLM for inference.'
+  name: rag-multi-step-pipeline-kserve-embeddings
 root:
   dag:
     tasks:
+      deploy-embedding-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-deploy-embedding-model
+        inputs:
+          parameters:
+            cpu_limits:
+              componentInputParameter: embedding_cpu_limits
+            cpu_requests:
+              componentInputParameter: embedding_cpu_requests
+            max_replicas:
+              componentInputParameter: embedding_max_replicas
+            memory_limits:
+              componentInputParameter: embedding_memory_limits
+            memory_requests:
+              componentInputParameter: embedding_memory_requests
+            min_replicas:
+              componentInputParameter: embedding_min_replicas
+            model_name:
+              componentInputParameter: embedding_model
+            namespace:
+              componentInputParameter: namespace
+            serving_runtime_name:
+              componentInputParameter: embedding_serving_runtime
+        taskInfo:
+          name: deploy-embedding-model
       download-model:
         cachingOptions:
           enableCache: true
@@ -955,13 +1127,20 @@ root:
         componentRef:
           name: comp-ingest-to-milvus
         dependentTasks:
+        - deploy-embedding-model
         - parse-and-chunk
         inputs:
           parameters:
             collection_name:
               componentInputParameter: collection_name
+            embed_batch_size:
+              componentInputParameter: embed_batch_size
             embedding_dim:
               componentInputParameter: embedding_dim
+            embedding_endpoint:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: deploy-embedding-model
             embedding_model:
               componentInputParameter: embedding_model
             milvus_host:
@@ -1058,12 +1237,44 @@ root:
         defaultValue: 4.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      embed_batch_size:
+        defaultValue: 64.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      embedding_cpu_limits:
+        defaultValue: '4'
+        isOptional: true
+        parameterType: STRING
+      embedding_cpu_requests:
+        defaultValue: '2'
+        isOptional: true
+        parameterType: STRING
       embedding_dim:
         defaultValue: 384.0
         isOptional: true
         parameterType: NUMBER_INTEGER
+      embedding_max_replicas:
+        defaultValue: 3.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      embedding_memory_limits:
+        defaultValue: 8Gi
+        isOptional: true
+        parameterType: STRING
+      embedding_memory_requests:
+        defaultValue: 4Gi
+        isOptional: true
+        parameterType: STRING
+      embedding_min_replicas:
+        defaultValue: 1.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
       embedding_model:
         defaultValue: sentence-transformers/all-MiniLM-L6-v2
+        isOptional: true
+        parameterType: STRING
+      embedding_serving_runtime:
+        defaultValue: embedding-runtime
         isOptional: true
         parameterType: STRING
       gpu_count:
