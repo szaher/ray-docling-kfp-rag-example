@@ -1055,7 +1055,7 @@ deploymentSpec:
           \            pdf_paths = pdf_paths[:NUM_FILES]\n                print(f\"\
           \  Limited to first {NUM_FILES} PDFs\")\n\n            print(f\"  Processing\
           \ {len(pdf_paths)} PDFs\")\n\n            if not pdf_paths:\n          \
-          \      print(\"\\\\n\u274C No PDFs found. Exiting.\")\n                log_verbose(\"\
+          \      print(\"\\\\nERROR: No PDFs found. Exiting.\")\n                log_verbose(\"\
           Checked paths:\")\n                log_verbose(f\"  - {input_full_path}\"\
           )\n                log_verbose(f\"  - {os.path.join(PVC_MOUNT_PATH, 'input/pdfs')}\"\
           )\n                return\n\n            if VERBOSE and len(pdf_paths) <=\

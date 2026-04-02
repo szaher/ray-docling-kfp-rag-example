@@ -402,7 +402,7 @@ def parse_and_chunk(
             print(f"  Processing {len(pdf_paths)} PDFs")
 
             if not pdf_paths:
-                print("\\n❌ No PDFs found. Exiting.")
+                print("\\nERROR: No PDFs found. Exiting.")
                 log_verbose("Checked paths:")
                 log_verbose(f"  - {input_full_path}")
                 log_verbose(f"  - {os.path.join(PVC_MOUNT_PATH, 'input/pdfs')}")
