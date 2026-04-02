@@ -467,7 +467,19 @@ def parse_and_chunk(
     )
     print(f"Removed kueue.x-k8s.io/queue-name label from RayJob '{rayjob_name}'.")
 
-    # Wait for Ray cluster to be fully ready before unsuspending
+    # Unsuspend the RayJob to trigger cluster creation
+    subprocess.run(
+        [
+            "oc", "patch", "rayjob", rayjob_name,
+            "-n", namespace,
+            "--type", "merge",
+            "-p", json.dumps({"spec": {"suspend": False}}),
+        ],
+        check=True,
+    )
+    print(f"Unsuspended RayJob '{rayjob_name}' - cluster will now start provisioning.")
+
+    # Wait for Ray cluster to be fully ready before job execution
     print(f"Waiting for Ray cluster to be ready with {num_workers} workers...")
     max_wait = 600  # 10 minutes
     start_time = time.time()
@@ -493,6 +505,12 @@ def parse_and_chunk(
         )
         cluster_state = result2.stdout.strip()
 
+        # Handle empty responses (cluster not created yet)
+        if not ready_workers:
+            ready_workers = "0"
+        if not cluster_state:
+            cluster_state = "creating"
+
         if ready_workers == str(num_workers) and cluster_state == "ready":
             print(f"Ray cluster ready: {ready_workers}/{num_workers} workers ready, state={cluster_state}")
             break
@@ -506,18 +524,6 @@ def parse_and_chunk(
 
         print(f"  Waiting for cluster... ready workers: {ready_workers}/{num_workers}, state: {cluster_state} ({elapsed:.0f}s)")
         time.sleep(10)
-
-    # Unsuspend the RayJob so it starts running
-    subprocess.run(
-        [
-            "oc", "patch", "rayjob", rayjob_name,
-            "-n", namespace,
-            "--type", "merge",
-            "-p", json.dumps({"spec": {"suspend": False}}),
-        ],
-        check=True,
-    )
-    print(f"Unsuspended RayJob '{rayjob_name}'.")
 
     # Wait for job completion
     print("Waiting for RayJob to complete...")

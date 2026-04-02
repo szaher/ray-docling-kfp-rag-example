@@ -1056,43 +1056,46 @@ deploymentSpec:
           \        [\n            \"oc\", \"label\", \"rayjob\", rayjob_name,\n  \
           \          \"-n\", namespace,\n            \"kueue.x-k8s.io/queue-name-\"\
           ,\n        ],\n        check=True,\n    )\n    print(f\"Removed kueue.x-k8s.io/queue-name\
-          \ label from RayJob '{rayjob_name}'.\")\n\n    # Wait for Ray cluster to\
-          \ be fully ready before unsuspending\n    print(f\"Waiting for Ray cluster\
-          \ to be ready with {num_workers} workers...\")\n    max_wait = 600  # 10\
-          \ minutes\n    start_time = time.time()\n    while True:\n        result\
-          \ = subprocess.run(\n            [\n                \"oc\", \"get\", \"\
-          rayjob\", rayjob_name,\n                \"-n\", namespace,\n           \
-          \     \"-o\", \"jsonpath={.status.rayClusterStatus.readyWorkerReplicas}\"\
+          \ label from RayJob '{rayjob_name}'.\")\n\n    # Unsuspend the RayJob to\
+          \ trigger cluster creation\n    subprocess.run(\n        [\n           \
+          \ \"oc\", \"patch\", \"rayjob\", rayjob_name,\n            \"-n\", namespace,\n\
+          \            \"--type\", \"merge\",\n            \"-p\", json.dumps({\"\
+          spec\": {\"suspend\": False}}),\n        ],\n        check=True,\n    )\n\
+          \    print(f\"Unsuspended RayJob '{rayjob_name}' - cluster will now start\
+          \ provisioning.\")\n\n    # Wait for Ray cluster to be fully ready before\
+          \ job execution\n    print(f\"Waiting for Ray cluster to be ready with {num_workers}\
+          \ workers...\")\n    max_wait = 600  # 10 minutes\n    start_time = time.time()\n\
+          \    while True:\n        result = subprocess.run(\n            [\n    \
+          \            \"oc\", \"get\", \"rayjob\", rayjob_name,\n               \
+          \ \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.rayClusterStatus.readyWorkerReplicas}\"\
           ,\n            ],\n            capture_output=True, text=True,\n       \
           \ )\n        ready_workers = result.stdout.strip()\n\n        # Also check\
           \ if cluster is in ready state\n        result2 = subprocess.run(\n    \
           \        [\n                \"oc\", \"get\", \"rayjob\", rayjob_name,\n\
           \                \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.rayClusterStatus.state}\"\
           ,\n            ],\n            capture_output=True, text=True,\n       \
-          \ )\n        cluster_state = result2.stdout.strip()\n\n        if ready_workers\
-          \ == str(num_workers) and cluster_state == \"ready\":\n            print(f\"\
-          Ray cluster ready: {ready_workers}/{num_workers} workers ready, state={cluster_state}\"\
-          )\n            break\n\n        elapsed = time.time() - start_time\n   \
-          \     if elapsed > max_wait:\n            raise TimeoutError(\n        \
-          \        f\"Ray cluster did not become ready within {max_wait}s. \"\n  \
-          \              f\"Ready workers: {ready_workers}/{num_workers}, state: {cluster_state}\"\
+          \ )\n        cluster_state = result2.stdout.strip()\n\n        # Handle\
+          \ empty responses (cluster not created yet)\n        if not ready_workers:\n\
+          \            ready_workers = \"0\"\n        if not cluster_state:\n    \
+          \        cluster_state = \"creating\"\n\n        if ready_workers == str(num_workers)\
+          \ and cluster_state == \"ready\":\n            print(f\"Ray cluster ready:\
+          \ {ready_workers}/{num_workers} workers ready, state={cluster_state}\")\n\
+          \            break\n\n        elapsed = time.time() - start_time\n     \
+          \   if elapsed > max_wait:\n            raise TimeoutError(\n          \
+          \      f\"Ray cluster did not become ready within {max_wait}s. \"\n    \
+          \            f\"Ready workers: {ready_workers}/{num_workers}, state: {cluster_state}\"\
           \n            )\n\n        print(f\"  Waiting for cluster... ready workers:\
           \ {ready_workers}/{num_workers}, state: {cluster_state} ({elapsed:.0f}s)\"\
-          )\n        time.sleep(10)\n\n    # Unsuspend the RayJob so it starts running\n\
-          \    subprocess.run(\n        [\n            \"oc\", \"patch\", \"rayjob\"\
-          , rayjob_name,\n            \"-n\", namespace,\n            \"--type\",\
-          \ \"merge\",\n            \"-p\", json.dumps({\"spec\": {\"suspend\": False}}),\n\
-          \        ],\n        check=True,\n    )\n    print(f\"Unsuspended RayJob\
-          \ '{rayjob_name}'.\")\n\n    # Wait for job completion\n    print(\"Waiting\
-          \ for RayJob to complete...\")\n    while True:\n        result = subprocess.run(\n\
-          \            [\n                \"oc\", \"get\", \"rayjob\", rayjob_name,\n\
-          \                \"-n\", namespace,\n                \"-o\", \"jsonpath={.status.jobStatus}\"\
-          ,\n            ],\n            capture_output=True, text=True,\n       \
-          \ )\n        status = result.stdout.strip()\n        if status == \"SUCCEEDED\"\
-          :\n            print(\"RayJob completed successfully.\")\n            break\n\
-          \        elif status == \"FAILED\":\n            raise RuntimeError(f\"\
-          RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\n    return\
-          \ f\"s3://{s3_bucket}/{s3_prefix}\"\n\n"
+          )\n        time.sleep(10)\n\n    # Wait for job completion\n    print(\"\
+          Waiting for RayJob to complete...\")\n    while True:\n        result =\
+          \ subprocess.run(\n            [\n                \"oc\", \"get\", \"rayjob\"\
+          , rayjob_name,\n                \"-n\", namespace,\n                \"-o\"\
+          , \"jsonpath={.status.jobStatus}\",\n            ],\n            capture_output=True,\
+          \ text=True,\n        )\n        status = result.stdout.strip()\n      \
+          \  if status == \"SUCCEEDED\":\n            print(\"RayJob completed successfully.\"\
+          )\n            break\n        elif status == \"FAILED\":\n            raise\
+          \ RuntimeError(f\"RayJob '{rayjob_name}' failed.\")\n        time.sleep(30)\n\
+          \n    return f\"s3://{s3_bucket}/{s3_prefix}\"\n\n"
         image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
 pipelineInfo:
   description: 'Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to
