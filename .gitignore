@@ -30,3 +30,8 @@ Thumbs.db
 
 # Compiled component YAMLs (regenerate with: python component.py)
 *_component.yaml
+
+# Secret files with actual credentials
+*.local.yaml
+*-secret.local.yaml
+minio-credentials.yaml

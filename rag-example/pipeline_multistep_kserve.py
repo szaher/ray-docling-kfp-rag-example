@@ -54,11 +54,17 @@ def rag_multistep_pipeline_kserve(
     num_workers: int = 2,
     worker_cpus: int = 8,
     worker_memory_gb: int = 16,
+    head_cpus: int = 2,
+    head_memory_gb: int = 8,
     cpus_per_actor: int = 4,
     min_actors: int = 2,
     max_actors: int = 4,
+    batch_size: int = 4,
     chunk_max_tokens: int = 256,
     num_files: int = 1000,
+    timeout_seconds: int = 600,
+    enable_profiling: bool = False,
+    verbose: bool = True,
     # Embedding model deployment
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
     embedding_dim: int = 384,
@@ -72,8 +78,10 @@ def rag_multistep_pipeline_kserve(
     # Milvus
     milvus_host: str = "milvus-milvus.milvus.svc.cluster.local",
     milvus_port: int = 19530,
+    milvus_db: str = "default",
     collection_name: str = "rag_documents",
     embed_batch_size: int = 64,
+    milvus_batch_size: int = 256,
     # LLM deployment
     llm_model_name: str = "mistralai/Mistral-7B-Instruct-v0.3",
     model_cache_pvc: str = "model-cache-pvc",
@@ -95,10 +103,16 @@ def rag_multistep_pipeline_kserve(
         num_workers=num_workers,
         worker_cpus=worker_cpus,
         worker_memory_gb=worker_memory_gb,
+        head_cpus=head_cpus,
+        head_memory_gb=head_memory_gb,
         cpus_per_actor=cpus_per_actor,
         min_actors=min_actors,
         max_actors=max_actors,
+        batch_size=batch_size,
         num_files=num_files,
+        timeout_seconds=timeout_seconds,
+        enable_profiling=enable_profiling,
+        verbose=verbose,
     )
     kubernetes.use_secret_as_env(
         chunk_task,
@@ -132,8 +146,10 @@ def rag_multistep_pipeline_kserve(
         embedding_dim=embedding_dim,
         milvus_host=milvus_host,
         milvus_port=milvus_port,
+        milvus_db=milvus_db,
         collection_name=collection_name,
         embed_batch_size=embed_batch_size,
+        milvus_batch_size=milvus_batch_size,
     )
     kubernetes.use_secret_as_env(
         ingest_task,

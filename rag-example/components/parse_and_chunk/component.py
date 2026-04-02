@@ -37,6 +37,8 @@ def parse_and_chunk(
     batch_size: int = 4,
     num_files: int = 0,
     timeout_seconds: int = 600,
+    enable_profiling: bool = False,
+    verbose: bool = True,
 ) -> str:
     """Parse PDFs and write chunked JSONL files to S3.
 
@@ -62,6 +64,8 @@ def parse_and_chunk(
         batch_size: Files per batch sent to each actor.
         num_files: Number of PDFs to process (0 = all).
         timeout_seconds: Per-file processing timeout.
+        enable_profiling: Enable cProfile profiling (outputs profile stats).
+        verbose: Enable verbose logging for debugging.
 
     Returns:
         The S3 URI where JSONL chunk files were written.
@@ -113,6 +117,14 @@ def parse_and_chunk(
         S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
         S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 
+        ENABLE_PROFILING = os.environ.get("ENABLE_PROFILING", "false").lower() == "true"
+        VERBOSE = os.environ.get("VERBOSE", "true").lower() == "true"
+
+        def log_verbose(msg):
+            """Log message if VERBOSE is enabled."""
+            if VERBOSE:
+                print(f"[VERBOSE] {msg}", flush=True)
+
 
         def _get_s3_client():
             import boto3
@@ -137,6 +149,15 @@ def parse_and_chunk(
             req_q, res_q, cpus_per_actor, chunk_max_tokens, tokenizer_name,
             s3_endpoint, s3_bucket, s3_prefix, s3_access_key, s3_secret_key,
         ):
+            import socket
+            worker_host = socket.gethostname()
+            worker_pid = os.getpid()
+
+            log_verbose(f"[Worker {worker_pid}@{worker_host}] Initializing converter worker")
+            log_verbose(f"[Worker {worker_pid}] CPUs per actor: {cpus_per_actor}")
+            log_verbose(f"[Worker {worker_pid}] Chunk max tokens: {chunk_max_tokens}")
+            log_verbose(f"[Worker {worker_pid}] Tokenizer: {tokenizer_name}")
+
             os.environ["OMP_NUM_THREADS"] = str(cpus_per_actor)
             os.environ["MKL_NUM_THREADS"] = str(cpus_per_actor)
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -149,6 +170,7 @@ def parse_and_chunk(
             )
             from docling.document_converter import DocumentConverter, PdfFormatOption
 
+            log_verbose(f"[Worker {worker_pid}] Creating Docling converter...")
             pipeline_options = PdfPipelineOptions()
             pipeline_options.do_ocr = False
             pipeline_options.do_table_structure = True
@@ -160,38 +182,69 @@ def parse_and_chunk(
                     InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
                 }
             )
-            chunker = HybridChunker(tokenizer=tokenizer_name, max_tokens=chunk_max_tokens)
+            log_verbose(f"[Worker {worker_pid}] Converter created")
 
+            log_verbose(f"[Worker {worker_pid}] Creating HybridChunker...")
+            chunker = HybridChunker(tokenizer=tokenizer_name, max_tokens=chunk_max_tokens)
+            log_verbose(f"[Worker {worker_pid}] Chunker created")
+
+            log_verbose(f"[Worker {worker_pid}] Connecting to S3: {s3_endpoint}")
             s3 = boto3.client(
                 "s3", endpoint_url=s3_endpoint,
                 aws_access_key_id=s3_access_key,
                 aws_secret_access_key=s3_secret_key,
                 region_name="us-east-1",
             )
-            res_q.put(("ready",))
+            log_verbose(f"[Worker {worker_pid}] S3 client connected")
 
+            res_q.put(("ready",))
+            log_verbose(f"[Worker {worker_pid}] Ready to process files")
+
+            file_count = 0
             while True:
                 msg = req_q.get()
                 if msg is None:
+                    log_verbose(f"[Worker {worker_pid}] Shutdown signal received, processed {file_count} files")
                     break
                 file_path = msg
+                file_count += 1
+                fname = os.path.basename(file_path)
+
                 try:
+                    t_start = time.time()
+                    log_verbose(f"[Worker {worker_pid}] Processing file {file_count}: {fname}")
+
                     with open(file_path, "rb") as f:
                         file_bytes = f.read()
                     if len(file_bytes) == 0:
+                        log_verbose(f"[Worker {worker_pid}] {fname}: EMPTY FILE")
                         res_q.put(("error", file_path, 0, 0, "File empty"))
                         continue
-                    fname = os.path.basename(file_path)
+
+                    log_verbose(f"[Worker {worker_pid}] {fname}: Read {len(file_bytes)} bytes")
                     stem = os.path.splitext(fname)[0]
                     stream = DocumentStream(name=fname, stream=io.BytesIO(file_bytes))
+
+                    t_convert_start = time.time()
                     result = converter.convert(stream)
+                    t_convert = time.time() - t_convert_start
+                    log_verbose(f"[Worker {worker_pid}] {fname}: Converted in {t_convert:.2f}s")
+
                     doc = result.document
                     pages = getattr(doc, "pages", None)
                     page_count = len(pages) if pages is not None else 0
+                    log_verbose(f"[Worker {worker_pid}] {fname}: {page_count} pages")
+
+                    t_chunk_start = time.time()
                     chunks = list(chunker.chunk(doc))
+                    t_chunk = time.time() - t_chunk_start
+                    log_verbose(f"[Worker {worker_pid}] {fname}: Generated {len(chunks)} chunks in {t_chunk:.2f}s")
+
                     if not chunks:
+                        log_verbose(f"[Worker {worker_pid}] {fname}: NO CHUNKS GENERATED")
                         res_q.put(("empty", file_path, page_count, 0, "No chunks"))
                         continue
+
                     lines = []
                     for idx, chunk in enumerate(chunks):
                         if chunk.text.strip():
@@ -201,28 +254,45 @@ def parse_and_chunk(
                                 "text": chunk.text,
                             }))
                     if not lines:
+                        log_verbose(f"[Worker {worker_pid}] {fname}: ALL CHUNKS EMPTY")
                         res_q.put(("empty", file_path, page_count, 0, "All chunks empty"))
                         continue
+
+                    log_verbose(f"[Worker {worker_pid}] {fname}: {len(lines)} non-empty chunks")
                     jsonl_body = "\\n".join(lines) + "\\n"
                     s3_key = f"{s3_prefix}/{stem}.jsonl"
+
+                    t_s3_start = time.time()
                     s3.put_object(
                         Bucket=s3_bucket, Key=s3_key,
                         Body=jsonl_body.encode("utf-8"),
                         ContentType="application/jsonl",
                     )
+                    t_s3 = time.time() - t_s3_start
+
+                    t_total = time.time() - t_start
+                    log_verbose(f"[Worker {worker_pid}] {fname}: Uploaded to s3://{s3_bucket}/{s3_key} in {t_s3:.2f}s (total: {t_total:.2f}s)")
+
                     res_q.put(("success", file_path, page_count, len(lines), ""))
+
                 except Exception as e:
-                    res_q.put(("error", file_path, 0, 0, str(e)[:200]))
+                    t_total = time.time() - t_start
+                    error_msg = str(e)[:200]
+                    log_verbose(f"[Worker {worker_pid}] {fname}: ERROR after {t_total:.2f}s: {error_msg}")
+                    res_q.put(("error", file_path, 0, 0, error_msg))
 
 
         class DoclingChunkProcessor:
             def __init__(self):
                 import socket
                 self.hostname = socket.gethostname()
+                self.batch_count = 0
+                log_verbose(f"[Actor@{self.hostname}] Initializing DoclingChunkProcessor")
                 self._start_worker()
                 print(f"[{self.hostname}] DoclingChunkProcessor ready (pid={self._worker.pid})")
 
             def _start_worker(self):
+                log_verbose(f"[Actor@{self.hostname}] Starting converter worker subprocess")
                 self._req_q = mp.Queue()
                 self._res_q = mp.Queue()
                 self._worker = mp.Process(
@@ -235,42 +305,57 @@ def parse_and_chunk(
                     daemon=True,
                 )
                 self._worker.start()
+                log_verbose(f"[Actor@{self.hostname}] Waiting for worker to be ready...")
                 msg = self._res_q.get(timeout=600)
                 assert msg[0] == "ready"
+                log_verbose(f"[Actor@{self.hostname}] Worker ready (pid={self._worker.pid})")
 
             def _restart_worker(self):
+                log_verbose(f"[Actor@{self.hostname}] Restarting worker (previous pid={self._worker.pid})")
                 if self._worker.is_alive():
                     self._worker.terminate()
                     self._worker.join(timeout=5)
                     if self._worker.is_alive():
                         self._worker.kill()
                         self._worker.join()
+                # Drain the queue
                 while True:
                     try:
                         self._res_q.get_nowait()
                     except queue.Empty:
                         break
                 self._start_worker()
-                print(f"[{self.hostname}] Restarted converter (pid={self._worker.pid})")
+                print(f"[{self.hostname}] Restarted converter (new pid={self._worker.pid})")
 
             def __call__(self, batch):
                 path_list = batch["path"]
+                self.batch_count += 1
+                batch_num = self.batch_count
+                log_verbose(f"[Actor@{self.hostname}] Processing batch #{batch_num} with {len(path_list)} files")
+
                 out = {k: [] for k in [
                     "source_file", "status", "page_count", "chunk_count",
                     "error", "duration_s", "actor_host",
                 ]}
-                for file_path in path_list:
+
+                for idx, file_path in enumerate(path_list, 1):
                     fname = os.path.basename(file_path)
+                    log_verbose(f"[Actor@{self.hostname}] Batch #{batch_num}, file {idx}/{len(path_list)}: {fname}")
+
                     t0 = time.time()
                     self._req_q.put(str(file_path))
                     try:
                         result = self._res_q.get(timeout=FILE_TIMEOUT)
                         status, _, page_count, chunk_count, error_msg = result
+                        elapsed = round(time.time() - t0, 3)
+                        log_verbose(f"[Actor@{self.hostname}] {fname}: {status} in {elapsed}s (pages={page_count}, chunks={chunk_count})")
                     except queue.Empty:
                         status, page_count, chunk_count = "timeout", 0, 0
                         error_msg = f"Timed out after {FILE_TIMEOUT}s"
+                        elapsed = round(time.time() - t0, 3)
+                        log_verbose(f"[Actor@{self.hostname}] {fname}: TIMEOUT after {elapsed}s, restarting worker")
                         self._restart_worker()
-                    elapsed = round(time.time() - t0, 3)
+
                     out["source_file"].append(fname)
                     out["status"].append(status)
                     out["page_count"].append(page_count)
@@ -278,27 +363,71 @@ def parse_and_chunk(
                     out["error"].append(error_msg)
                     out["duration_s"].append(elapsed)
                     out["actor_host"].append(self.hostname)
+
+                log_verbose(f"[Actor@{self.hostname}] Completed batch #{batch_num}")
                 return out
 
 
         def run():
+            print("=" * 80)
+            print("DOCLING PDF PARSING & CHUNKING JOB")
+            print("=" * 80)
+            log_verbose(f"Configuration:")
+            log_verbose(f"  PVC mount: {PVC_MOUNT_PATH}")
+            log_verbose(f"  Input path: {INPUT_PATH}")
+            log_verbose(f"  Full input path: {os.path.join(PVC_MOUNT_PATH, INPUT_PATH)}")
+            log_verbose(f"  Number of files: {NUM_FILES if NUM_FILES > 0 else 'all'}")
+            log_verbose(f"  Actors: {MIN_ACTORS} to {MAX_ACTORS}")
+            log_verbose(f"  CPUs per actor: {CPUS_PER_ACTOR}")
+            log_verbose(f"  Batch size: {BATCH_SIZE}")
+            log_verbose(f"  Chunk max tokens: {CHUNK_MAX_TOKENS}")
+            log_verbose(f"  Tokenizer: {TOKENIZER}")
+            log_verbose(f"  File timeout: {FILE_TIMEOUT}s")
+            log_verbose(f"  S3 endpoint: {S3_ENDPOINT}")
+            log_verbose(f"  S3 bucket: {S3_BUCKET}")
+            log_verbose(f"  S3 prefix: {S3_PREFIX}")
+            log_verbose(f"  Verbose: {VERBOSE}")
+            log_verbose(f"  Profiling: {ENABLE_PROFILING}")
+
+            print(f"\\nScanning for PDFs...")
             input_full_path = os.path.join(PVC_MOUNT_PATH, INPUT_PATH)
+            log_verbose(f"Globbing: {input_full_path}/**/*.pdf")
             pdf_paths = sorted(glob.glob(f"{input_full_path}/**/*.pdf", recursive=True))
+            print(f"  Found {len(pdf_paths)} total PDFs")
+
             if NUM_FILES > 0:
                 pdf_paths = pdf_paths[:NUM_FILES]
-            print(f"Found {len(pdf_paths)} PDFs to process.")
+                print(f"  Limited to first {NUM_FILES} PDFs")
+
+            print(f"  Processing {len(pdf_paths)} PDFs")
+
             if not pdf_paths:
-                print("No PDFs found. Exiting.")
+                print("\\n❌ No PDFs found. Exiting.")
+                log_verbose("Checked paths:")
+                log_verbose(f"  - {input_full_path}")
+                log_verbose(f"  - {os.path.join(PVC_MOUNT_PATH, 'input/pdfs')}")
                 return
+
+            if VERBOSE and len(pdf_paths) <= 20:
+                log_verbose("PDFs to process:")
+                for i, path in enumerate(pdf_paths, 1):
+                    log_verbose(f"  {i}. {path}")
+
+            print(f"\\nSetting up S3...")
             s3 = _get_s3_client()
             _ensure_bucket(s3, S3_BUCKET)
-            print(f"Output: s3://{S3_BUCKET}/{S3_PREFIX}/")
+            print(f"  Output: s3://{S3_BUCKET}/{S3_PREFIX}/")
 
+            print(f"\\nPreparing Ray dataset...")
             target_blocks = MAX_ACTORS * REPARTITION_FACTOR
+            log_verbose(f"Creating dataset from {len(pdf_paths)} paths")
             ds = ray.data.from_pandas(pd.DataFrame({"path": pdf_paths}))
+            log_verbose(f"Repartitioning to {target_blocks} blocks ({MAX_ACTORS} actors × {REPARTITION_FACTOR})")
             ds = ds.repartition(target_blocks)
-            print(f"Repartitioned into {target_blocks} blocks for {MAX_ACTORS} max actors.")
+            print(f"  Repartitioned into {target_blocks} blocks for {MAX_ACTORS} max actors")
 
+            print(f"\\nStarting document processing...")
+            log_verbose(f"Creating actor pool strategy (min={MIN_ACTORS}, max={MAX_ACTORS})")
             results_ds = ds.map_batches(
                 DoclingChunkProcessor,
                 compute=ray.data.ActorPoolStrategy(
@@ -309,14 +438,25 @@ def parse_and_chunk(
                 num_cpus=CPUS_PER_ACTOR,
             )
 
+            print(f"  Actor pool: {MIN_ACTORS}-{MAX_ACTORS} actors")
+            print(f"  Batch size: {BATCH_SIZE} files/batch")
+            print(f"  Expected total batches: ~{len(pdf_paths) // BATCH_SIZE + 1}")
+            print("")
+
             start_time = time.time()
             success_count = error_count = timeout_count = empty_count = 0
             total_pages = total_chunks = 0
             actor_dist = {}
             errors_list = []
+            last_report_time = start_time
+            report_interval = 30  # Report progress every 30 seconds
 
+            batch_num = 0
             for batch in results_ds.iter_batches(batch_size=200, batch_format="numpy"):
+                batch_num += 1
                 n = len(batch["source_file"])
+                log_verbose(f"Processing result batch {batch_num} with {n} files")
+
                 for i in range(n):
                     status = str(batch["status"][i])
                     fname = str(batch["source_file"][i])
@@ -335,8 +475,21 @@ def parse_and_chunk(
                     actor = str(batch["actor_host"][i])
                     actor_dist[actor] = actor_dist.get(actor, 0) + 1
 
+                # Progress reporting
+                now = time.time()
+                if now - last_report_time >= report_interval:
+                    elapsed = now - start_time
+                    total_processed = success_count + error_count + timeout_count + empty_count
+                    pct = (total_processed / len(pdf_paths) * 100) if pdf_paths else 0
+                    rate = total_processed / elapsed if elapsed > 0 else 0
+                    eta = (len(pdf_paths) - total_processed) / rate if rate > 0 else 0
+                    print(f"  Progress: {total_processed}/{len(pdf_paths)} ({pct:.1f}%) | "
+                          f"{rate:.1f} files/s | ETA: {eta/60:.1f}min")
+                    last_report_time = now
+
             wall_clock = time.time() - start_time
             total_files = success_count + error_count + timeout_count + empty_count
+            print(f"\\n  Completed in {wall_clock:.1f}s")
 
             s3_objects = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX + "/")
             s3_count = s3_objects.get("KeyCount", 0)
@@ -368,10 +521,39 @@ def parse_and_chunk(
 
 
         if __name__ == "__main__":
+            import sys
+            print(f"Python version: {sys.version}")
+            print(f"Ray initializing...")
             ray.init(ignore_reinit_error=True)
+            print(f"Ray initialized")
+
             ctx = ray.data.DataContext.get_current()
             ctx.max_errored_blocks = MAX_ERRORED_BLOCKS
-            run()
+            log_verbose(f"Set max_errored_blocks to {MAX_ERRORED_BLOCKS}")
+
+            if ENABLE_PROFILING:
+                import cProfile
+                import pstats
+                import io
+                print("\\n" + "=" * 80)
+                print("PROFILING ENABLED")
+                print("=" * 80)
+                profiler = cProfile.Profile()
+                profiler.enable()
+                try:
+                    run()
+                finally:
+                    profiler.disable()
+                    print("\\n" + "=" * 80)
+                    print("PROFILING RESULTS")
+                    print("=" * 80)
+                    s = io.StringIO()
+                    ps = pstats.Stats(profiler, stream=s).sort_stats("cumulative")
+                    ps.print_stats(50)  # Top 50 functions
+                    print(s.getvalue())
+                    print("=" * 80)
+            else:
+                run()
     ''')
 
     from codeflare_sdk import ManagedClusterConfig, RayJob
@@ -448,6 +630,8 @@ def parse_and_chunk(
                 "S3_PREFIX": s3_prefix,
                 "S3_ACCESS_KEY": os.environ["S3_ACCESS_KEY"],
                 "S3_SECRET_KEY": os.environ["S3_SECRET_KEY"],
+                "ENABLE_PROFILING": "true" if enable_profiling else "false",
+                "VERBOSE": "true" if verbose else "false",
             },
         ),
         ttl_seconds_after_finished=300,

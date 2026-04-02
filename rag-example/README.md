@@ -2,6 +2,14 @@
 
 End-to-end Retrieval-Augmented Generation (RAG) pipeline on OpenShift AI that processes PDF documents, ingests them into Milvus, deploys an LLM, and enables question-answering over the ingested content.
 
+## 🚀 Quick Links
+
+- **New to this project?** Start with [Setup](#setup) below
+- **Preparing for a demo?** See [DEMO_GUIDE.md](../docs/DEMO_GUIDE.md)
+- **Validating prerequisites?** Run [`scripts/validate_prerequisites.sh`](../scripts/validate_prerequisites.sh)
+- **Production readiness?** Review [DEMO_READINESS_REPORT.md](../DEMO_READINESS_REPORT.md)
+- **Customizing parameters?** See [docs/pipeline-parameters.md](../docs/pipeline-parameters.md)
+
 ## Pipelines
 
 This example provides **two pipeline variants**:
@@ -151,7 +159,9 @@ The Role grants:
 
 ### 2. Create S3 (MinIO) credentials Secret
 
-The pipeline reads S3 credentials from a Kubernetes Secret. Create it using the CLI:
+The pipeline reads S3 credentials from a Kubernetes Secret.
+
+**Option 1: Create from command line (RECOMMENDED)**
 
 ```bash
 oc create secret generic minio-secret \
@@ -160,28 +170,53 @@ oc create secret generic minio-secret \
   -n ray-docling
 ```
 
-Or apply the manifest (edit the values first):
+**Option 2: Use the template file**
 
 ```bash
-oc apply -f manifests/minio-secret.yaml
+# For development/testing with default MinIO:
+oc create secret generic minio-secret \
+  --from-literal=access_key=minioadmin \
+  --from-literal=secret_key=minioadmin \
+  -n ray-docling
 ```
+
+⚠️ **Security Note**: The `manifests/minio-secret.yaml` is a template with placeholder values. **Never commit actual credentials to git.** See the file header for instructions.
 
 The Secret name defaults to `minio-secret` and can be overridden via the `s3_secret_name` pipeline parameter.
 
 ### 3. Verify prerequisites
 
+**Automated validation (RECOMMENDED):**
+
+```bash
+cd /path/to/rag-ray
+./scripts/validate_prerequisites.sh
+```
+
+This script checks:
+- ✓ Namespace exists
+- ✓ PVCs (data-pvc, model-cache-pvc) are bound
+- ✓ MinIO/S3 service and credentials
+- ✓ Milvus service
+- ✓ KubeRay operator
+- ✓ Data Science Pipelines (DSPA)
+- ✓ Service account permissions
+- ✓ GPU nodes (for LLM)
+
+**Manual verification:**
+
 ```bash
 # KubeRay operator running
-oc get pods -n ray-system
+oc get deployment kuberay-operator -n openshift-operators
 
 # Milvus reachable
-oc exec -it <any-pod> -n rag-example -- curl -s http://milvus-milvus.milvus.svc.cluster.local:19530/v1/vector/collections
+oc exec -it <any-pod> -n ray-docling -- curl -s http://milvus-milvus.milvus.svc.cluster.local:19530/v1/vector/collections
 
 # MinIO reachable
-oc exec -it <any-pod> -n rag-example -- curl -s http://minio-service.default.svc.cluster.local:9000/minio/health/live
+oc exec -it <any-pod> -n ray-docling -- curl -s http://minio-service.default.svc.cluster.local:9000/minio/health/live
 
 # PVC with PDFs exists
-oc get pvc data-pvc -n rag-example
+oc get pvc data-pvc -n ray-docling
 ```
 
 ## Quick Start
