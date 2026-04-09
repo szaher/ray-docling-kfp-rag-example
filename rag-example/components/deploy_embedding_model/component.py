@@ -52,6 +52,57 @@ def deploy_embedding_model(
     # Derive InferenceService name from model name
     isvc_name = model_name.split("/")[-1].lower().replace("_", "-").replace(".", "-")
 
+    # --- Create or update ServingRuntime ---
+    serving_runtime = {
+        "apiVersion": "serving.kserve.io/v1alpha1",
+        "kind": "ServingRuntime",
+        "metadata": {
+            "name": serving_runtime_name,
+            "namespace": namespace,
+        },
+        "spec": {
+            "containers": [{
+                "name": "kserve-container",
+                "image": "ghcr.io/huggingface/text-embeddings-inference:latest",
+                "args": [
+                    "--model-id", model_name,
+                    "--port", "8080",
+                    "--max-batch-tokens", "8192",
+                ],
+                "ports": [{"containerPort": 8080, "protocol": "TCP"}],
+                "resources": {
+                    "requests": {"cpu": cpu_requests, "memory": memory_requests},
+                    "limits": {"cpu": cpu_limits, "memory": memory_limits},
+                },
+            }],
+            "supportedModelFormats": [{"name": "huggingface", "version": "1"}],
+        },
+    }
+
+    try:
+        custom_api.get_namespaced_custom_object(
+            group="serving.kserve.io", version="v1alpha1",
+            namespace=namespace, plural="servingruntimes",
+            name=serving_runtime_name,
+        )
+        custom_api.patch_namespaced_custom_object(
+            group="serving.kserve.io", version="v1alpha1",
+            namespace=namespace, plural="servingruntimes",
+            name=serving_runtime_name, body=serving_runtime,
+        )
+        print(f"ServingRuntime '{serving_runtime_name}' updated.")
+    except kclient.rest.ApiException as e:
+        if e.status == 404:
+            custom_api.create_namespaced_custom_object(
+                group="serving.kserve.io", version="v1alpha1",
+                namespace=namespace, plural="servingruntimes",
+                body=serving_runtime,
+            )
+            print(f"ServingRuntime '{serving_runtime_name}' created.")
+        else:
+            raise
+
+    # --- Create or update InferenceService ---
     isvc = {
         "apiVersion": "serving.kserve.io/v1beta1",
         "kind": "InferenceService",
@@ -67,9 +118,8 @@ def deploy_embedding_model(
                 "minReplicas": min_replicas,
                 "maxReplicas": max_replicas,
                 "model": {
-                    "modelFormat": {"name": "embedding"},
+                    "modelFormat": {"name": "huggingface"},
                     "runtime": serving_runtime_name,
-                    "storageUri": f"hf://{model_name}",
                     "resources": {
                         "requests": {
                             "cpu": cpu_requests,
@@ -85,31 +135,23 @@ def deploy_embedding_model(
         },
     }
 
-    # Create or update
     try:
         custom_api.get_namespaced_custom_object(
-            group="serving.kserve.io",
-            version="v1beta1",
-            namespace=namespace,
-            plural="inferenceservices",
+            group="serving.kserve.io", version="v1beta1",
+            namespace=namespace, plural="inferenceservices",
             name=isvc_name,
         )
         custom_api.patch_namespaced_custom_object(
-            group="serving.kserve.io",
-            version="v1beta1",
-            namespace=namespace,
-            plural="inferenceservices",
-            name=isvc_name,
-            body=isvc,
+            group="serving.kserve.io", version="v1beta1",
+            namespace=namespace, plural="inferenceservices",
+            name=isvc_name, body=isvc,
         )
         print(f"InferenceService '{isvc_name}' updated.")
     except kclient.rest.ApiException as e:
         if e.status == 404:
             custom_api.create_namespaced_custom_object(
-                group="serving.kserve.io",
-                version="v1beta1",
-                namespace=namespace,
-                plural="inferenceservices",
+                group="serving.kserve.io", version="v1beta1",
+                namespace=namespace, plural="inferenceservices",
                 body=isvc,
             )
             print(f"InferenceService '{isvc_name}' created.")

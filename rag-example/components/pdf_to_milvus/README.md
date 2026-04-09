@@ -1,108 +1,88 @@
-# pdf_to_milvus Component
+# PDF to Milvus Component (All-in-One)
 
-KFP component that processes PDFs with Docling, chunks with `HybridChunker`, generates embeddings, and inserts directly into Milvus. No intermediate files are written.
+KFP component that parses PDFs, chunks them, generates embeddings, and inserts directly into Milvus -- all in a single RayJob. Unlike the multi-step pipeline (which uses separate `parse_and_chunk` and `ingest_to_milvus` components with S3 as intermediate storage), this component does everything end-to-end without intermediate files.
 
-## Overview
-
-This component submits a RayJob to an OpenShift cluster using the CodeFlare SDK. The RayJob runs `docling_milvus_process.py`, which uses Ray Data's actor pool to distribute PDF processing across worker pods.
-
-### Processing Pipeline (per file)
-
-```
-PDF file (from PVC)
-  |-> Docling DocumentConverter (parse)
-  |-> HybridChunker (structure-aware chunking)
-  |-> SentenceTransformer.encode() (embed)
-  |-> MilvusClient.insert() (ingest)
-  |-> Status report (success/error/timeout)
-```
-
-Each Ray actor runs a long-lived subprocess that holds:
-- Docling `DocumentConverter` with PDF pipeline options
-- `HybridChunker` initialized with the embedding model's tokenizer
-- `SentenceTransformer` model for embeddings
-- `MilvusClient` connection for inserts
-
-This avoids model reload overhead between files. If a subprocess crashes or hangs (timeout), the actor restarts it automatically.
-
-## Parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `pvc_name` | str | — | Name of the ReadWriteMany PVC with input PDFs |
-| `pvc_mount_path` | str | — | Mount path for the PVC inside pods |
-| `input_path` | str | — | Relative path to input PDFs under the PVC |
-| `ray_image` | str | — | Container image with Ray + Docling pre-installed |
-| `namespace` | str | — | OpenShift namespace for the RayJob |
-| `milvus_host` | str | — | Milvus service hostname |
-| `milvus_port` | int | `19530` | Milvus gRPC port |
-| `milvus_db` | str | `default` | Milvus database name |
-| `collection_name` | str | `rag_documents` | Milvus collection name |
-| `embedding_model` | str | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
-| `embedding_dim` | int | `384` | Embedding vector dimension |
-| `chunk_max_tokens` | int | `256` | Max tokens per chunk |
-| `num_workers` | int | `2` | Number of Ray worker pods |
-| `worker_cpus` | int | `8` | CPUs per worker pod |
-| `worker_memory_gb` | int | `16` | Memory (GB) per worker pod |
-| `head_cpus` | int | `2` | CPUs for the Ray head pod |
-| `head_memory_gb` | int | `4` | Memory (GB) for the Ray head pod |
-| `cpus_per_actor` | int | `4` | CPUs per Docling processing actor |
-| `min_actors` | int | `2` | Minimum actor pool size |
-| `max_actors` | int | `4` | Maximum actor pool size |
-| `batch_size` | int | `4` | Files per batch per actor |
-| `num_files` | int | `0` | Number of PDFs to process (0 = all) |
-| `timeout_seconds` | int | `600` | Per-file processing timeout |
-
-## Returns
-
-A string with the Milvus collection name (e.g., `rag_documents`).
+> **Note**: This is an alternative to the multi-step approach. The multi-step pipeline (`parse_and_chunk` + `ingest_to_milvus`) is preferred for production because it decouples parsing from ingestion and supports both local and service embedding modes. This component only supports local embeddings.
 
 ## How It Works
 
-1. **Submit RayJob** via CodeFlare SDK with the configured cluster spec (head + workers), PVC volume mount, and runtime environment variables.
+1. **Submit RayJob** -- Uses CodeFlare SDK (`ManagedClusterConfig` + `RayJob`) to create a Ray cluster with the specified workers. The entrypoint script is written to a temp directory and uploaded via Ray's `working_dir` runtime env.
+2. **Patch RayJob** -- Sets `num-cpus=0` on the head node so no processing actors are scheduled there, reserving it for coordination.
+3. **Setup Milvus Collection** -- Creates (or recreates) a Milvus collection with fields for source file, chunk index, text, and embedding vector. Creates an IVF_FLAT index with COSINE metric.
+4. **Distributed Processing** -- The Ray entrypoint:
+   - Scans the PVC for PDF files.
+   - Creates a Ray Dataset and repartitions across actors.
+   - Each actor spawns a subprocess worker that initializes Docling, HybridChunker, SentenceTransformer, and a Milvus client.
+   - For each PDF: convert with Docling, chunk with HybridChunker, embed with sentence-transformers, batch-insert into Milvus.
+5. **Completion** -- Loads the Milvus collection for searching and prints processing report with throughput stats.
 
-2. **Patch head `num-cpus=0`** so that no processing actors are scheduled on the head node, reserving it for coordination.
+### Comparison with Multi-Step Pipeline
 
-3. **Poll for completion** by checking the RayJob's `.status.jobStatus` field every 30 seconds. Raises `RuntimeError` on failure.
+| Aspect | pdf_to_milvus (this) | parse_and_chunk + ingest_to_milvus |
+|--------|---------------------|-----------------------------------|
+| Intermediate storage | None | S3 (JSONL files) |
+| Embedding mode | Local only | Local or deployed service |
+| Failure recovery | Must reprocess all PDFs | Can re-run ingestion from S3 |
+| PVC access | Read-only | Read-only |
+| Resource usage | Higher per-worker (embedding model loaded on each) | Embedding runs in separate step |
 
-### Inside the RayJob (`docling_milvus_process.py`)
+## Inputs
 
-1. **Driver** discovers PDFs on the PVC, creates/recreates the Milvus collection with an `IVF_FLAT` index, repartitions the file list into blocks, and launches the Ray Data actor pool.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pvc_name` | `str` | *required* | Name of the PVC with input PDFs |
+| `pvc_mount_path` | `str` | *required* | Mount path for the PVC inside pods |
+| `input_path` | `str` | *required* | Relative path to input PDFs under the PVC |
+| `ray_image` | `str` | *required* | Container image with Ray + Docling pre-installed |
+| `namespace` | `str` | *required* | OpenShift namespace for the RayJob |
+| `milvus_host` | `str` | *required* | Milvus service hostname |
+| `milvus_port` | `int` | `19530` | Milvus gRPC port |
+| `milvus_db` | `str` | `"default"` | Milvus database name |
+| `collection_name` | `str` | `"rag_documents"` | Milvus collection name |
+| `embedding_model` | `str` | `"sentence-transformers/all-MiniLM-L6-v2"` | Sentence-transformers model for embeddings |
+| `embedding_dim` | `int` | `384` | Dimension of the embedding vectors |
+| `chunk_max_tokens` | `int` | `256` | Maximum tokens per chunk |
+| `num_workers` | `int` | `2` | Number of Ray worker pods |
+| `worker_cpus` | `int` | `8` | CPUs per Ray worker pod |
+| `worker_memory_gb` | `int` | `16` | Memory (GB) per Ray worker pod |
+| `head_cpus` | `int` | `2` | CPUs for the Ray head pod |
+| `head_memory_gb` | `int` | `4` | Memory (GB) for the Ray head pod |
+| `cpus_per_actor` | `int` | `4` | CPUs per processing actor |
+| `min_actors` | `int` | `2` | Minimum actor pool size |
+| `max_actors` | `int` | `4` | Maximum actor pool size |
+| `batch_size` | `int` | `4` | Files per batch sent to each actor |
+| `num_files` | `int` | `0` | Number of PDFs to process (0 = all) |
+| `timeout_seconds` | `int` | `600` | Per-file processing timeout |
 
-2. **Actors** each spawn a subprocess that loads Docling, the chunker, the embedding model, and a Milvus client. Files are sent one at a time through a multiprocessing queue.
+## Output
 
-3. **Subprocess** for each file: parse with Docling, chunk with `HybridChunker`, embed all chunks, batch-insert into Milvus. Returns status (success/error/timeout) with metrics.
+| Type | Description |
+|------|-------------|
+| `str` | Milvus collection name (e.g. `rag_documents`) |
 
-4. **Driver** collects results and prints a processing report with throughput stats, error summary, and actor distribution.
+### Milvus Collection Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | INT64 | Auto-generated primary key |
+| `source_file` | VARCHAR(512) | Original PDF filename |
+| `chunk_index` | INT64 | Chunk position within the source file |
+| `text` | VARCHAR(8192) | Chunk text content |
+| `embedding` | FLOAT_VECTOR | Vector embedding (dimension = `embedding_dim`) |
+
+**Index**: IVF_FLAT with COSINE metric, nlist=128.
 
 ## Dependencies
 
-### Component runtime (KFP pod)
+- **Base image**: `registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9`
+- **Python packages** (KFP pod): `codeflare-sdk==0.35.0`, `kubernetes>=28.1.0`
+- **Ray runtime packages**: `opencv-python-headless`, `pypdfium2`, `pymilvus>=2.4.0`, `sentence-transformers>=2.2.0`
+- **Pre-installed in `ray_image`**: `docling`, `ray`, `pandas`
+- **External services**: KubeRay Operator (>= 1.1.0), Milvus (>= 2.4.0)
 
-```
-codeflare-sdk>=0.25.0
-kubernetes>=28.1.0
-ray[default]>=2.44.1
-```
-
-### RayJob worker image
-
-Must include:
-- `docling` (PDF parsing, HybridChunker)
-- `sentence-transformers` (embeddings)
-- `pymilvus` (Milvus client)
-- `opencv-python-headless`, `pypdfium2` (Docling PDF backend)
-- `ray[default]` (Ray Data)
-- `pandas` (Ray Data format)
-
-### External services
-
-- **KubeRay Operator** (>= 1.1.0) — manages RayJob CRDs
-- **Milvus** (>= 2.4.0) — vector database
+> **Known limitation**: This component still uses `subprocess.run(["oc", ...])` for RayJob patching and status polling. The multi-step `parse_and_chunk` component has been updated to use the Kubernetes Python client instead.
 
 ## Usage
-
-### In a KFP pipeline
 
 ```python
 from components.pdf_to_milvus import pdf_to_milvus
@@ -114,35 +94,7 @@ def my_pipeline():
         pvc_mount_path="/mnt/data",
         input_path="input/pdfs",
         ray_image="quay.io/rhoai-szaher/docling-ray:latest",
-        namespace="rag-example",
+        namespace="ray-docling",
         milvus_host="milvus-milvus.milvus.svc.cluster.local",
     )
 ```
-
-### Standalone compilation
-
-```bash
-python component.py
-# Output: component_component.yaml
-```
-
-## Milvus Collection Schema
-
-Created by the RayJob driver before processing starts:
-
-| Field | Type | Notes |
-|---|---|---|
-| `id` | INT64 | Primary key, auto-generated |
-| `source_file` | VARCHAR(512) | Source PDF filename |
-| `chunk_index` | INT64 | Chunk position in document |
-| `text` | VARCHAR(8192) | Chunk text |
-| `embedding` | FLOAT_VECTOR(384) | Normalized embedding |
-
-Index: `IVF_FLAT`, metric: `COSINE`, `nlist=128`.
-
-## Scaling Guidelines
-
-- **More files:** Increase `max_actors` and `num_workers`. Each worker can host multiple actors if it has enough CPUs (`worker_cpus / cpus_per_actor`).
-- **Larger PDFs:** Increase `timeout_seconds` and `worker_memory_gb`. Docling parsing of large documents with many tables can be memory-intensive.
-- **Higher throughput:** Increase `batch_size` to send more files per actor call, reducing scheduling overhead. Monitor memory usage.
-- **Chunk quality:** Adjust `chunk_max_tokens`. Smaller chunks give more precise retrieval but increase the number of vectors. Larger chunks provide more context per result.

@@ -1,21 +1,23 @@
 """KFP Pipeline: Multi-Step RAG Document Processing.
 
-Orchestrates four reusable components:
+Orchestrates up to five reusable components:
 1. Parse & chunk PDFs (Docling + HybridChunker via RayJob -> S3)
-2. Ingest into Milvus (read chunks from S3, embed locally, insert)
-3. Download LLM to PVC (cached — skips if already present)
-4. Deploy LLM for RAG inference (vLLM InferenceService from PVC)
+2. Deploy embedding model (optional — only when deploy_embedding=True)
+3. Ingest into Milvus (read chunks from S3, embed locally or via service, insert)
+4. Download LLM to PVC (cached — skips if already present)
+5. Deploy LLM for RAG inference (vLLM InferenceService from PVC)
 
 Intermediate chunks are stored in S3 (MinIO), not on the PVC.
 The data PVC is mounted read-only for input PDFs.
 The model cache PVC stores downloaded HuggingFace models.
-Embedding uses a local sentence-transformers model (no TEI runtime needed).
+Embedding supports two modes: local sentence-transformers or a deployed service.
 S3 credentials are read from a Kubernetes Secret (not pipeline parameters).
 """
 
 from kfp import dsl
 from kfp import kubernetes
 
+from components.deploy_embedding_model.component import deploy_embedding_model
 from components.download_model.component import download_model
 from components.ingest_to_milvus.component import ingest_to_milvus
 from components.model_deployment.component import model_deployment
@@ -26,7 +28,8 @@ from components.parse_and_chunk.component import parse_and_chunk
     name="RAG Multi-Step Pipeline",
     description=(
         "Multi-step RAG pipeline: parse & chunk PDFs with Docling "
-        "(output to S3), ingest into Milvus with local embeddings, "
+        "(output to S3), ingest into Milvus with local or deployed embeddings, "
+        "optionally deploy an embedding service, "
         "download and deploy an LLM for inference (cached on PVC)."
     ),
 )
@@ -58,6 +61,8 @@ def rag_multistep_pipeline(
     enable_profiling: bool = False,
     verbose: bool = True,
     # Embedding
+    deploy_embedding: bool = False,  # If True, deploys embedding model as InferenceService
+    embedding_endpoint: str = "",  # If empty, uses local model; else uses deployed service
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
     embedding_dim: int = 384,
     # Milvus
@@ -108,7 +113,19 @@ def rag_multistep_pipeline(
         },
     )
 
-    # Step 2: Ingest into Milvus (local embedding, no TEI endpoint needed)
+    # Step 2 (optional): Deploy embedding model as InferenceService
+    # When deploy_embedding=True, the pipeline deploys the embedding
+    # model and passes its endpoint to the ingest step.
+    # When deploy_embedding=False, embedding_endpoint is used as-is
+    # (empty string = local model, URL = existing service).
+    with dsl.If(deploy_embedding == True):  # noqa: E712
+        embed_deploy_task = deploy_embedding_model(
+            model_name=embedding_model,
+            namespace=namespace,
+        )
+        embed_deploy_task.after(chunk_task)
+
+    # Step 3: Ingest into Milvus (supports local or deployed embedding model)
     ingest_task = ingest_to_milvus(
         s3_endpoint=s3_endpoint,
         s3_bucket=s3_bucket,
@@ -117,6 +134,7 @@ def rag_multistep_pipeline(
         milvus_port=milvus_port,
         milvus_db=milvus_db,
         collection_name=collection_name,
+        embedding_endpoint=embedding_endpoint,
         embedding_model=embedding_model,
         embedding_dim=embedding_dim,
         embed_batch_size=embed_batch_size,
@@ -132,7 +150,7 @@ def rag_multistep_pipeline(
     )
     ingest_task.after(chunk_task)
 
-    # Step 3: Download LLM to PVC (skips if already cached)
+    # Step 4: Download LLM to PVC (skips if already cached)
     download_task = download_model(
         model_name=llm_model_name,
         model_cache_pvc=model_cache_pvc,
@@ -143,7 +161,7 @@ def rag_multistep_pipeline(
         mount_path="/mnt/models",
     )
 
-    # Step 4: Deploy LLM for RAG inference (from PVC cache)
+    # Step 5: Deploy LLM for RAG inference (from PVC cache)
     deploy_task = model_deployment(
         model_name=llm_model_name,
         namespace=namespace,

@@ -73,7 +73,6 @@ def parse_and_chunk(
     import base64
     import json
     import os
-    import subprocess
     import textwrap
     import time
 
@@ -637,29 +636,41 @@ def parse_and_chunk(
         ttl_seconds_after_finished=300,
     )
 
+    from kubernetes import config as k8s_config
+    from kubernetes import client as k8s_client
+
+    try:
+        k8s_config.load_incluster_config()
+    except k8s_config.ConfigException:
+        k8s_config.load_kube_config()
+
+    custom_api = k8s_client.CustomObjectsApi()
+    rayjob_group = "ray.io"
+    rayjob_version = "v1"
+    rayjob_plural = "rayjobs"
+
     job.submit()
     print(f"RayJob '{rayjob_name}' submitted.")
 
     # Remove kueue queue-name label so kueue does not manage this job
-    subprocess.run(
-        [
-            "oc", "label", "rayjob", rayjob_name,
-            "-n", namespace,
-            "kueue.x-k8s.io/queue-name-",
-        ],
-        check=True,
+    rayjob_obj = custom_api.get_namespaced_custom_object(
+        group=rayjob_group, version=rayjob_version,
+        namespace=namespace, plural=rayjob_plural, name=rayjob_name,
     )
-    print(f"Removed kueue.x-k8s.io/queue-name label from RayJob '{rayjob_name}'.")
+    labels = rayjob_obj.get("metadata", {}).get("labels", {})
+    if "kueue.x-k8s.io/queue-name" in labels:
+        custom_api.patch_namespaced_custom_object(
+            group=rayjob_group, version=rayjob_version,
+            namespace=namespace, plural=rayjob_plural, name=rayjob_name,
+            body={"metadata": {"labels": {"kueue.x-k8s.io/queue-name": None}}},
+        )
+        print(f"Removed kueue.x-k8s.io/queue-name label from RayJob '{rayjob_name}'.")
 
     # Unsuspend the RayJob to trigger cluster creation
-    subprocess.run(
-        [
-            "oc", "patch", "rayjob", rayjob_name,
-            "-n", namespace,
-            "--type", "merge",
-            "-p", json.dumps({"spec": {"suspend": False}}),
-        ],
-        check=True,
+    custom_api.patch_namespaced_custom_object(
+        group=rayjob_group, version=rayjob_version,
+        namespace=namespace, plural=rayjob_plural, name=rayjob_name,
+        body={"spec": {"suspend": False}},
     )
     print(f"Unsuspended RayJob '{rayjob_name}' - cluster will now start provisioning.")
 
@@ -668,32 +679,15 @@ def parse_and_chunk(
     max_wait = 600  # 10 minutes
     start_time = time.time()
     while True:
-        result = subprocess.run(
-            [
-                "oc", "get", "rayjob", rayjob_name,
-                "-n", namespace,
-                "-o", "jsonpath={.status.rayClusterStatus.readyWorkerReplicas}",
-            ],
-            capture_output=True, text=True,
+        rayjob_obj = custom_api.get_namespaced_custom_object(
+            group=rayjob_group, version=rayjob_version,
+            namespace=namespace, plural=rayjob_plural, name=rayjob_name,
         )
-        ready_workers = result.stdout.strip()
+        ray_status = rayjob_obj.get("status", {})
+        cluster_status = ray_status.get("rayClusterStatus", {})
 
-        # Also check if cluster is in ready state
-        result2 = subprocess.run(
-            [
-                "oc", "get", "rayjob", rayjob_name,
-                "-n", namespace,
-                "-o", "jsonpath={.status.rayClusterStatus.state}",
-            ],
-            capture_output=True, text=True,
-        )
-        cluster_state = result2.stdout.strip()
-
-        # Handle empty responses (cluster not created yet)
-        if not ready_workers:
-            ready_workers = "0"
-        if not cluster_state:
-            cluster_state = "creating"
+        ready_workers = str(cluster_status.get("readyWorkerReplicas", 0))
+        cluster_state = cluster_status.get("state", "creating")
 
         if ready_workers == str(num_workers) and cluster_state == "ready":
             print(f"Ray cluster ready: {ready_workers}/{num_workers} workers ready, state={cluster_state}")
@@ -712,19 +706,15 @@ def parse_and_chunk(
     # Wait for job completion
     print("Waiting for RayJob to complete...")
     while True:
-        result = subprocess.run(
-            [
-                "oc", "get", "rayjob", rayjob_name,
-                "-n", namespace,
-                "-o", "jsonpath={.status.jobStatus}",
-            ],
-            capture_output=True, text=True,
+        rayjob_obj = custom_api.get_namespaced_custom_object(
+            group=rayjob_group, version=rayjob_version,
+            namespace=namespace, plural=rayjob_plural, name=rayjob_name,
         )
-        status = result.stdout.strip()
-        if status == "SUCCEEDED":
+        job_status = rayjob_obj.get("status", {}).get("jobStatus", "")
+        if job_status == "SUCCEEDED":
             print("RayJob completed successfully.")
             break
-        elif status == "FAILED":
+        elif job_status == "FAILED":
             raise RuntimeError(f"RayJob '{rayjob_name}' failed.")
         time.sleep(30)
 

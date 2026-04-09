@@ -1,120 +1,87 @@
-# model_deployment Component
+# Model Deployment Component
 
-KFP component that deploys a model on OpenShift AI using a KServe `InferenceService` with the vLLM serving runtime.
-
-## Overview
-
-This component creates or updates a KServe `InferenceService` CR in the specified namespace. It supports models from HuggingFace (pulled automatically) or from a PVC path. After creation, it polls the InferenceService status until the `Ready` condition is `True`, then returns the inference endpoint URL.
-
-Uses in-cluster Kubernetes config (service account token) — no explicit API URL or token required.
-
-## Parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `model_name` | str | — | Model name/path (e.g., `mistralai/Mistral-7B-Instruct-v0.3`) |
-| `namespace` | str | — | Namespace to deploy the InferenceService |
-| `runtime` | str | `vllm` | Serving runtime (used as `modelFormat.name`) |
-| `model_path` | str | `""` | Optional PVC path. If empty, pulls from HuggingFace via `hf://` URI |
-| `serving_runtime_name` | str | `vllm-runtime` | Name of the ServingRuntime CR |
-| `min_replicas` | int | `1` | Minimum replicas |
-| `max_replicas` | int | `1` | Maximum replicas |
-| `gpu_count` | int | `1` | GPUs per replica (`nvidia.com/gpu` resource). Set to 0 to disable GPU requests |
-
-## Returns
-
-The inference endpoint URL with `/v1` suffix (e.g., `https://model-endpoint.apps.cluster.example.com/v1`), compatible with the OpenAI API format used by vLLM.
+KFP component that deploys an LLM on OpenShift AI using vLLM. Creates a KServe ServingRuntime and InferenceService matching the RHOAI dashboard deployment pattern, serving the model from a PVC cache with GPU acceleration.
 
 ## How It Works
 
-1. **Connect** to the Kubernetes API using in-cluster service account config.
-
-2. **Build InferenceService spec** with:
+1. **Derive Names** -- Converts the HuggingFace model ID to a Kubernetes-safe name (e.g. `mistralai/Mistral-7B-Instruct-v0.3` becomes `mistral-7b-instruct-v0-3`). This name is used for both the ServingRuntime and InferenceService.
+2. **Lookup HardwareProfile** -- Attempts to read the specified `HardwareProfile` CR from the configured namespace. If found, its `resourceVersion` is included in InferenceService annotations for RHOAI dashboard compatibility. If not found, proceeds without it.
+3. **Create ServingRuntime** -- Creates or updates a `ServingRuntime` CR configured with:
+   - Red Hat vLLM CUDA container image
+   - OpenAI-compatible API server entrypoint (`vllm.entrypoints.openai.api_server`)
+   - Flags: `--max-model-len`, `--enforce-eager`, `--gpu-memory-utilization=0.99`, `--max-num-seqs=16`
+   - RHOAI dashboard labels and annotations for UI visibility
+4. **Delete Existing InferenceService** -- If an InferenceService with the same name exists, it is deleted first and the component waits up to 2 minutes for full cleanup. This avoids stuck rolling updates when changing model parameters or GPU configuration.
+5. **Create InferenceService** -- Creates a fresh `InferenceService` CR with:
    - `RawDeployment` mode (no Knative dependency)
-   - Resource requests: 2 CPU / 8Gi memory, limits: 4 CPU / 16Gi memory
-   - GPU resources if `gpu_count > 0`
-   - `storageUri`: either `hf://<model_name>` or the provided `model_path`
+   - `storageUri` pointing to the PVC-cached model (`pvc://{model_cache_pvc}/{model_dir}`)
+   - GPU resource requests/limits (`nvidia.com/gpu`)
+   - RHOAI dashboard labels (`opendatahub.io/dashboard: true`)
+   - Auth disabled for in-cluster access (`security.opendatahub.io/enable-auth: false`)
+6. **Wait for Ready** -- Polls the InferenceService status every 30 seconds (up to 30 minutes) until the `Ready` condition is `True`.
 
-3. **Create or update** the InferenceService (idempotent — patches if it already exists).
+### Why Delete-and-Recreate?
 
-4. **Wait for Ready** by polling every 30 seconds for up to 30 minutes. Returns the endpoint URL from `.status.url` when ready.
+Unlike the create-or-update pattern used in other components, this component deletes the existing InferenceService before creating a new one. This is intentional: KServe `RawDeployment` mode can get stuck in a rolling update when GPU resources or model paths change, because the old pod holds the GPU lease until the new pod is ready, creating a deadlock. Deleting first ensures the GPU is released.
 
-## Prerequisites
+## Inputs
 
-- **OpenShift AI (RHOAI)** installed with KServe controller
-- **ServingRuntime CR** named `vllm-runtime` (or custom name) must exist in the target namespace. RHOAI typically pre-installs this.
-- **GPU nodes** available in the cluster (for vLLM model serving)
-- **HuggingFace access** if pulling gated models (configure `HF_TOKEN` in the ServingRuntime or namespace secrets)
-- The KFP pipeline service account must have permissions to create/patch InferenceService CRs in the target namespace.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model_name` | `str` | *required* | HuggingFace model ID (e.g. `mistralai/Mistral-7B-Instruct-v0.3`) |
+| `namespace` | `str` | *required* | Namespace to deploy the InferenceService |
+| `model_dir` | `str` | *required* | PVC sub-path with model files (output from `download_model`) |
+| `model_cache_pvc` | `str` | *required* | Name of the PVC containing cached model weights |
+| `hardware_profile_name` | `str` | `"gpu-profile"` | HardwareProfile CR name for GPU resources |
+| `hardware_profile_namespace` | `str` | `"redhat-ods-applications"` | Namespace of the HardwareProfile CR |
+| `min_replicas` | `int` | `1` | Minimum number of replicas |
+| `max_replicas` | `int` | `1` | Maximum number of replicas |
+| `gpu_count` | `int` | `1` | Number of NVIDIA GPUs per replica |
+| `max_model_len` | `int` | `4096` | Maximum context length (limits KV cache memory) |
+| `cpu_requests` | `str` | `"2"` | CPU requests for the predictor pod |
+| `memory_requests` | `str` | `"8Gi"` | Memory requests for the predictor pod |
+| `cpu_limits` | `str` | `"2"` | CPU limits for the predictor pod |
+| `memory_limits` | `str` | `"8Gi"` | Memory limits for the predictor pod |
 
-## Usage
+## Output
 
-```python
-from components.model_deployment import model_deployment
+| Type | Description |
+|------|-------------|
+| `str` | Inference endpoint URL with `/v1` suffix (e.g. `http://mistral-7b-instruct-v0-3.ray-docling.svc.cluster.local/v1`) |
 
-@dsl.pipeline(name="Deploy Model")
-def deploy_pipeline():
-    deploy = model_deployment(
-        model_name="mistralai/Mistral-7B-Instruct-v0.3",
-        namespace="rag-example",
-        gpu_count=1,
-    )
-```
-
-### Standalone compilation
+The endpoint exposes an OpenAI-compatible API:
 
 ```bash
-python component.py
-# Output: component_component.yaml
+# List models
+curl http://<endpoint>/v1/models
+
+# Chat completion
+curl http://<endpoint>/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "mistral-7b-instruct-v0-3", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-## InferenceService Spec
+## Pipeline Integration
 
-The component creates an InferenceService like:
+This component is the final step in the model chain. It depends on `download_model` for the `model_dir` output:
 
-```yaml
-apiVersion: serving.kserve.io/v1beta1
-kind: InferenceService
-metadata:
-  name: mistral-7b-instruct-v0-3
-  annotations:
-    serving.kserve.io/deploymentMode: RawDeployment
-spec:
-  predictor:
-    minReplicas: 1
-    maxReplicas: 1
-    model:
-      modelFormat:
-        name: vllm
-      runtime: vllm-runtime
-      storageUri: "hf://mistralai/Mistral-7B-Instruct-v0.3"
-      resources:
-        requests:
-          cpu: "2"
-          memory: 8Gi
-          nvidia.com/gpu: "1"
-        limits:
-          cpu: "4"
-          memory: 16Gi
-          nvidia.com/gpu: "1"
+```python
+download_task = download_model(model_name=llm_model_name, model_cache_pvc=model_cache_pvc)
+kubernetes.mount_pvc(download_task, pvc_name=model_cache_pvc, mount_path="/mnt/models")
+
+deploy_task = model_deployment(
+    model_name=llm_model_name,
+    namespace=namespace,
+    model_dir=download_task.output,  # PVC sub-path from download_model
+    model_cache_pvc=model_cache_pvc,
+)
 ```
+
+The model chain (download -> deploy) runs in parallel with the data chain (parse -> ingest).
 
 ## Dependencies
 
-### Component runtime (KFP pod)
-
-```
-kubernetes>=28.1.0
-```
-
-### Cluster requirements
-
-- KServe controller (part of OpenShift AI)
-- vLLM ServingRuntime CR in the target namespace
-- Sufficient GPU quota
-
-## Notes
-
-- The InferenceService name is derived from `model_name` by taking the last path segment, lowercasing, and replacing dots with hyphens (e.g., `mistralai/Mistral-7B-Instruct-v0.3` becomes `mistral-7b-instruct-v0-3`).
-- The component uses `RawDeployment` mode, which creates a standard Kubernetes Deployment instead of a Knative Service. This avoids requiring Knative/Serverless on the cluster.
-- If the InferenceService already exists, it is patched in place rather than deleted and recreated.
+- **Base image**: `registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9`
+- **Python packages**: `kubernetes>=28.1.0`
+- **Cluster requirements**: KServe CRDs, NVIDIA GPU operator, vLLM CUDA container image
+- **Upstream dependency**: Requires `download_model` output as `model_dir` input
