@@ -311,14 +311,24 @@ class RAGSetup:
         self,
         model_name: str,
         service_name: str = "embedding-service",
-        runtime_image: str = "ghcr.io/huggingface/text-embeddings-inference:latest",
+        runtime_image: str = "registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a",
         cpu_requests: str = "2",
         cpu_limits: str = "4",
         memory_requests: str = "4Gi",
         memory_limits: str = "8Gi",
+        gpu_count: int = 1,
+        max_model_len: int = 512,
     ):
-        """Deploy a text embedding model as a KServe InferenceService."""
+        """Deploy a text embedding model as a KServe InferenceService.
+
+        Uses vLLM with ``--task embedding`` on GPU to serve an
+        OpenAI-compatible ``/v1/embeddings`` endpoint.
+        """
         ns = self.namespace
+
+        gpu_resources = {}
+        if gpu_count > 0:
+            gpu_resources = {"nvidia.com/gpu": str(gpu_count)}
 
         serving_runtime = {
             "apiVersion": "serving.kserve.io/v1alpha1",
@@ -330,18 +340,34 @@ class RAGSetup:
                         "name": "kserve-container",
                         "image": runtime_image,
                         "args": [
-                            "--model-id", model_name,
+                            "--model", model_name,
+                            "--task", "embedding",
                             "--port", "8080",
-                            "--max-batch-tokens", "8192",
+                            "--dtype", "float16",
+                            "--max-model-len", str(max_model_len),
+                        ],
+                        "env": [
+                            {"name": "HF_HOME", "value": "/tmp/hf_home"},
+                            {"name": "HUGGINGFACE_HUB_CACHE", "value": "/tmp/hf_home"},
+                            {"name": "HF_HUB_OFFLINE", "value": "0"},
+                            {"name": "TRANSFORMERS_OFFLINE", "value": "0"},
                         ],
                         "ports": [{"containerPort": 8080, "protocol": "TCP"}],
                         "resources": {
-                            "requests": {"cpu": cpu_requests, "memory": memory_requests},
-                            "limits": {"cpu": cpu_limits, "memory": memory_limits},
+                            "requests": {
+                                "cpu": cpu_requests,
+                                "memory": memory_requests,
+                                **gpu_resources,
+                            },
+                            "limits": {
+                                "cpu": cpu_limits,
+                                "memory": memory_limits,
+                                **gpu_resources,
+                            },
                         },
                     }
                 ],
-                "supportedModelFormats": [{"name": "huggingface", "version": "1"}],
+                "supportedModelFormats": [{"name": "vLLM", "version": "1"}],
             },
         }
 
@@ -358,11 +384,19 @@ class RAGSetup:
             "spec": {
                 "predictor": {
                     "model": {
-                        "modelFormat": {"name": "huggingface"},
+                        "modelFormat": {"name": "vLLM"},
                         "runtime": service_name,
                         "resources": {
-                            "requests": {"cpu": cpu_requests, "memory": memory_requests},
-                            "limits": {"cpu": cpu_limits, "memory": memory_limits},
+                            "requests": {
+                                "cpu": cpu_requests,
+                                "memory": memory_requests,
+                                **gpu_resources,
+                            },
+                            "limits": {
+                                "cpu": cpu_limits,
+                                "memory": memory_limits,
+                                **gpu_resources,
+                            },
                         },
                     }
                 }

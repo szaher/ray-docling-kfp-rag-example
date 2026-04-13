@@ -1,6 +1,6 @@
 # PIPELINE DEFINITION
 # Name: rag-multi-step-pipeline
-# Description: Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to S3), ingest into Milvus with local embeddings, download and deploy an LLM for inference (cached on PVC).
+# Description: Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to S3), ingest into Milvus with local or deployed embeddings, optionally deploy an embedding service, download and deploy an LLM for inference (cached on PVC).
 # Inputs:
 #    batch_size: int [Default: 4.0]
 #    chunk_max_tokens: int [Default: 256.0]
@@ -8,9 +8,11 @@
 #    cpus_per_actor: int [Default: 4.0]
 #    deploy_embedding: bool [Default: False]
 #    embed_batch_size: int [Default: 64.0]
-#    embedding_dim: int [Default: 384.0]
+#    embedding_dim: int [Default: 768.0]
 #    embedding_endpoint: str [Default: '']
-#    embedding_model: str [Default: 'sentence-transformers/all-MiniLM-L6-v2']
+#    embedding_gpu_count: int [Default: 1.0]
+#    embedding_model: str [Default: 'ibm-granite/granite-embedding-125m-english']
+#    embedding_runtime_image: str [Default: 'registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a']
 #    enable_profiling: bool [Default: False]
 #    gpu_count: int [Default: 1.0]
 #    head_cpus: int [Default: 2.0]
@@ -50,17 +52,25 @@ components:
             name: comp-deploy-embedding-model
           inputs:
             parameters:
+              gpu_count:
+                componentInputParameter: pipelinechannel--embedding_gpu_count
               model_name:
                 componentInputParameter: pipelinechannel--embedding_model
               namespace:
                 componentInputParameter: pipelinechannel--namespace
+              runtime_image:
+                componentInputParameter: pipelinechannel--embedding_runtime_image
           taskInfo:
             name: deploy-embedding-model
     inputDefinitions:
       parameters:
         pipelinechannel--deploy_embedding:
           parameterType: BOOLEAN
+        pipelinechannel--embedding_gpu_count:
+          parameterType: NUMBER_INTEGER
         pipelinechannel--embedding_model:
+          parameterType: STRING
+        pipelinechannel--embedding_runtime_image:
           parameterType: STRING
         pipelinechannel--namespace:
           parameterType: STRING
@@ -78,6 +88,16 @@ components:
           description: CPU requests per replica.
           isOptional: true
           parameterType: STRING
+        gpu_count:
+          defaultValue: 1.0
+          description: Number of GPUs per replica.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        max_model_len:
+          defaultValue: 512.0
+          description: Maximum sequence length for the embedding model.
+          isOptional: true
+          parameterType: NUMBER_INTEGER
         max_replicas:
           defaultValue: 1.0
           description: Maximum number of replicas.
@@ -99,10 +119,15 @@ components:
           isOptional: true
           parameterType: NUMBER_INTEGER
         model_name:
-          description: HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').
+          description: HuggingFace model ID (e.g. 'ibm-granite/granite-embedding-125m-english').
           parameterType: STRING
         namespace:
           description: Namespace to deploy the InferenceService.
+          parameterType: STRING
+        runtime_image:
+          defaultValue: registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a
+          description: Container image for the vLLM embedding server.
+          isOptional: true
           parameterType: STRING
         serving_runtime_name:
           defaultValue: embedding-runtime
@@ -406,40 +431,56 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef deploy_embedding_model(\n    model_name: str,\n    namespace:\
-          \ str,\n    serving_runtime_name: str = \"embedding-runtime\",\n    min_replicas:\
-          \ int = 1,\n    max_replicas: int = 1,\n    cpu_requests: str = \"2\",\n\
-          \    cpu_limits: str = \"4\",\n    memory_requests: str = \"4Gi\",\n   \
-          \ memory_limits: str = \"8Gi\",\n) -> str:\n    \"\"\"Deploy a text embedding\
-          \ model using KServe InferenceService.\n\n    Args:\n        model_name:\
-          \ HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').\n\
+          \ str,\n    serving_runtime_name: str = \"embedding-runtime\",\n    runtime_image:\
+          \ str = \"registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a\"\
+          ,\n    min_replicas: int = 1,\n    max_replicas: int = 1,\n    cpu_requests:\
+          \ str = \"2\",\n    cpu_limits: str = \"4\",\n    memory_requests: str =\
+          \ \"4Gi\",\n    memory_limits: str = \"8Gi\",\n    gpu_count: int = 1,\n\
+          \    max_model_len: int = 512,\n) -> str:\n    \"\"\"Deploy a text embedding\
+          \ model using KServe InferenceService.\n\n    Uses vLLM with ``--task embedding``\
+          \ on GPU to serve an\n    OpenAI-compatible ``/v1/embeddings`` endpoint.\n\
+          \n    Args:\n        model_name: HuggingFace model ID (e.g. 'ibm-granite/granite-embedding-125m-english').\n\
           \        namespace: Namespace to deploy the InferenceService.\n        serving_runtime_name:\
-          \ Name of the embedding ServingRuntime CR.\n        min_replicas: Minimum\
-          \ number of replicas.\n        max_replicas: Maximum number of replicas.\n\
-          \        cpu_requests: CPU requests per replica.\n        cpu_limits: CPU\
-          \ limits per replica.\n        memory_requests: Memory requests per replica.\n\
-          \        memory_limits: Memory limits per replica.\n\n    Returns:\n   \
-          \     The embedding service endpoint URL.\n    \"\"\"\n    import time\n\
-          \n    from kubernetes import client as kclient\n    from kubernetes import\
-          \ config\n\n    config.load_incluster_config()\n    custom_api = kclient.CustomObjectsApi()\n\
-          \n    # Derive InferenceService name from model name\n    isvc_name = model_name.split(\"\
-          /\")[-1].lower().replace(\"_\", \"-\").replace(\".\", \"-\")\n\n    # ---\
-          \ Create or update ServingRuntime ---\n    serving_runtime = {\n       \
-          \ \"apiVersion\": \"serving.kserve.io/v1alpha1\",\n        \"kind\": \"\
-          ServingRuntime\",\n        \"metadata\": {\n            \"name\": serving_runtime_name,\n\
+          \ Name of the embedding ServingRuntime CR.\n        runtime_image: Container\
+          \ image for the vLLM embedding server.\n        min_replicas: Minimum number\
+          \ of replicas.\n        max_replicas: Maximum number of replicas.\n    \
+          \    cpu_requests: CPU requests per replica.\n        cpu_limits: CPU limits\
+          \ per replica.\n        memory_requests: Memory requests per replica.\n\
+          \        memory_limits: Memory limits per replica.\n        gpu_count: Number\
+          \ of GPUs per replica.\n        max_model_len: Maximum sequence length for\
+          \ the embedding model.\n\n    Returns:\n        The embedding service endpoint\
+          \ URL.\n    \"\"\"\n    import time\n\n    from kubernetes import client\
+          \ as kclient\n    from kubernetes import config\n\n    config.load_incluster_config()\n\
+          \    custom_api = kclient.CustomObjectsApi()\n\n    # Derive InferenceService\
+          \ name from model name\n    isvc_name = model_name.split(\"/\")[-1].lower().replace(\"\
+          _\", \"-\").replace(\".\", \"-\")\n\n    # --- Create or update ServingRuntime\
+          \ ---\n    gpu_resources = {}\n    if gpu_count > 0:\n        gpu_resources\
+          \ = {\"nvidia.com/gpu\": str(gpu_count)}\n\n    serving_runtime = {\n  \
+          \      \"apiVersion\": \"serving.kserve.io/v1alpha1\",\n        \"kind\"\
+          : \"ServingRuntime\",\n        \"metadata\": {\n            \"name\": serving_runtime_name,\n\
           \            \"namespace\": namespace,\n        },\n        \"spec\": {\n\
           \            \"containers\": [{\n                \"name\": \"kserve-container\"\
-          ,\n                \"image\": \"ghcr.io/huggingface/text-embeddings-inference:latest\"\
-          ,\n                \"args\": [\n                    \"--model-id\", model_name,\n\
-          \                    \"--port\", \"8080\",\n                    \"--max-batch-tokens\"\
-          , \"8192\",\n                ],\n                \"ports\": [{\"containerPort\"\
-          : 8080, \"protocol\": \"TCP\"}],\n                \"resources\": {\n   \
-          \                 \"requests\": {\"cpu\": cpu_requests, \"memory\": memory_requests},\n\
-          \                    \"limits\": {\"cpu\": cpu_limits, \"memory\": memory_limits},\n\
-          \                },\n            }],\n            \"supportedModelFormats\"\
-          : [{\"name\": \"huggingface\", \"version\": \"1\"}],\n        },\n    }\n\
-          \n    try:\n        custom_api.get_namespaced_custom_object(\n         \
-          \   group=\"serving.kserve.io\", version=\"v1alpha1\",\n            namespace=namespace,\
-          \ plural=\"servingruntimes\",\n            name=serving_runtime_name,\n\
+          ,\n                \"image\": runtime_image,\n                \"args\":\
+          \ [\n                    \"--model\", model_name,\n                    \"\
+          --task\", \"embedding\",\n                    \"--port\", \"8080\",\n  \
+          \                  \"--dtype\", \"float16\",\n                    \"--max-model-len\"\
+          , str(max_model_len),\n                ],\n                \"env\": [\n\
+          \                    {\"name\": \"HF_HOME\", \"value\": \"/tmp/hf_home\"\
+          },\n                    {\"name\": \"HUGGINGFACE_HUB_CACHE\", \"value\"\
+          : \"/tmp/hf_home\"},\n                    {\"name\": \"HF_HUB_OFFLINE\"\
+          , \"value\": \"0\"},\n                    {\"name\": \"TRANSFORMERS_OFFLINE\"\
+          , \"value\": \"0\"},\n                ],\n                \"ports\": [{\"\
+          containerPort\": 8080, \"protocol\": \"TCP\"}],\n                \"resources\"\
+          : {\n                    \"requests\": {\n                        \"cpu\"\
+          : cpu_requests,\n                        \"memory\": memory_requests,\n\
+          \                        **gpu_resources,\n                    },\n    \
+          \                \"limits\": {\n                        \"cpu\": cpu_limits,\n\
+          \                        \"memory\": memory_limits,\n                  \
+          \      **gpu_resources,\n                    },\n                },\n  \
+          \          }],\n            \"supportedModelFormats\": [{\"name\": \"vLLM\"\
+          , \"version\": \"1\"}],\n        },\n    }\n\n    try:\n        custom_api.get_namespaced_custom_object(\n\
+          \            group=\"serving.kserve.io\", version=\"v1alpha1\",\n      \
+          \      namespace=namespace, plural=\"servingruntimes\",\n            name=serving_runtime_name,\n\
           \        )\n        custom_api.patch_namespaced_custom_object(\n       \
           \     group=\"serving.kserve.io\", version=\"v1alpha1\",\n            namespace=namespace,\
           \ plural=\"servingruntimes\",\n            name=serving_runtime_name, body=serving_runtime,\n\
@@ -457,15 +498,16 @@ deploymentSpec:
           : \"RawDeployment\",\n            },\n        },\n        \"spec\": {\n\
           \            \"predictor\": {\n                \"minReplicas\": min_replicas,\n\
           \                \"maxReplicas\": max_replicas,\n                \"model\"\
-          : {\n                    \"modelFormat\": {\"name\": \"huggingface\"},\n\
-          \                    \"runtime\": serving_runtime_name,\n              \
-          \      \"resources\": {\n                        \"requests\": {\n     \
-          \                       \"cpu\": cpu_requests,\n                       \
-          \     \"memory\": memory_requests,\n                        },\n       \
-          \                 \"limits\": {\n                            \"cpu\": cpu_limits,\n\
-          \                            \"memory\": memory_limits,\n              \
-          \          },\n                    },\n                },\n            },\n\
-          \        },\n    }\n\n    try:\n        custom_api.get_namespaced_custom_object(\n\
+          : {\n                    \"modelFormat\": {\"name\": \"vLLM\"},\n      \
+          \              \"runtime\": serving_runtime_name,\n                    \"\
+          resources\": {\n                        \"requests\": {\n              \
+          \              \"cpu\": cpu_requests,\n                            \"memory\"\
+          : memory_requests,\n                            **gpu_resources,\n     \
+          \                   },\n                        \"limits\": {\n        \
+          \                    \"cpu\": cpu_limits,\n                            \"\
+          memory\": memory_limits,\n                            **gpu_resources,\n\
+          \                        },\n                    },\n                },\n\
+          \            },\n        },\n    }\n\n    try:\n        custom_api.get_namespaced_custom_object(\n\
           \            group=\"serving.kserve.io\", version=\"v1beta1\",\n       \
           \     namespace=namespace, plural=\"inferenceservices\",\n            name=isvc_name,\n\
           \        )\n        custom_api.patch_namespaced_custom_object(\n       \
@@ -1288,8 +1330,8 @@ deploymentSpec:
         image: registry.redhat.io/rhoai/odh-pipeline-runtime-datascience-cpu-py312-rhel9@sha256:f9844dc150592a9f196283b3645dda92bd80dfdb3d467fa8725b10267ea5bdbc
 pipelineInfo:
   description: 'Multi-step RAG pipeline: parse & chunk PDFs with Docling (output to
-    S3), ingest into Milvus with local embeddings, download and deploy an LLM for
-    inference (cached on PVC).'
+    S3), ingest into Milvus with local or deployed embeddings, optionally deploy an
+    embedding service, download and deploy an LLM for inference (cached on PVC).'
   name: rag-multi-step-pipeline
 root:
   dag:
@@ -1303,8 +1345,12 @@ root:
           parameters:
             pipelinechannel--deploy_embedding:
               componentInputParameter: deploy_embedding
+            pipelinechannel--embedding_gpu_count:
+              componentInputParameter: embedding_gpu_count
             pipelinechannel--embedding_model:
               componentInputParameter: embedding_model
+            pipelinechannel--embedding_runtime_image:
+              componentInputParameter: embedding_runtime_image
             pipelinechannel--namespace:
               componentInputParameter: namespace
         taskInfo:
@@ -1467,15 +1513,23 @@ root:
         isOptional: true
         parameterType: NUMBER_INTEGER
       embedding_dim:
-        defaultValue: 384.0
+        defaultValue: 768.0
         isOptional: true
         parameterType: NUMBER_INTEGER
       embedding_endpoint:
         defaultValue: ''
         isOptional: true
         parameterType: STRING
+      embedding_gpu_count:
+        defaultValue: 1.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
       embedding_model:
-        defaultValue: sentence-transformers/all-MiniLM-L6-v2
+        defaultValue: ibm-granite/granite-embedding-125m-english
+        isOptional: true
+        parameterType: STRING
+      embedding_runtime_image:
+        defaultValue: registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a
         isOptional: true
         parameterType: STRING
       enable_profiling:

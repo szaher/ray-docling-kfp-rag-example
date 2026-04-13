@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Pipeline Architecture</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    margin: 0;
+    padding: 2rem;
+    background: #f8f9fa;
+    color: #1a1a1a;
+  }
+  h1 {
+    text-align: center;
+    margin-bottom: 0.25rem;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    margin-bottom: 2rem;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+    background: #fff;
+    border-radius: 12px;
+    padding: 2rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+</style>
+</head>
+<body>
+
+<h1>RAG Pipeline Architecture</h1>
+<p class="subtitle">Kubeflow Pipelines on Red Hat OpenShift AI</p>
+
+<div class="mermaid">
+flowchart TB
+  subgraph PREREQS["<b>Prerequisites</b> &mdash; rag_setup.py"]
+    direction LR
+    S3_SECRET["S3 Secret<br/><i>minio-secret</i>"]
+    PVC["Model Cache PVC<br/><i>model-cache-pvc (30Gi)</i>"]
+    RBAC["RBAC<br/><i>Role + RoleBinding</i>"]
+  end
+
+  subgraph PIPELINE["<b>KFP Pipeline</b> &mdash; rag_multistep_pipeline"]
+    direction TB
+
+    subgraph DATA_CHAIN["Data Chain"]
+      direction TB
+      PARSE["<b>1. Parse &amp; Chunk</b><br/>RayJob + Docling + HybridChunker<br/><i>Reads PDFs from PVC<br/>Writes JSONL to S3</i>"]
+      EMBED_DEPLOY{"<b>2. Deploy Embedding</b><br/><i>(optional)</i><br/>KServe InferenceService"}
+      INGEST["<b>3. Ingest to Milvus</b><br/>Embed chunks + batch insert<br/><i>Local or service embeddings</i>"]
+
+      PARSE --> EMBED_DEPLOY
+      PARSE --> INGEST
+      EMBED_DEPLOY -.->|"endpoint"| INGEST
+    end
+
+    subgraph MODEL_CHAIN["Model Chain"]
+      direction TB
+      DOWNLOAD["<b>4. Download Model</b><br/>HuggingFace → PVC cache<br/><i>Skips if already cached</i>"]
+      DEPLOY["<b>5. Deploy Model</b><br/>vLLM InferenceService<br/><i>GPU-accelerated serving</i>"]
+
+      DOWNLOAD --> DEPLOY
+    end
+  end
+
+  subgraph EXTERNAL["<b>External Services</b>"]
+    direction LR
+    MINIO[("MinIO / S3<br/><i>Chunk storage</i>")]
+    MILVUS[("Milvus<br/><i>Vector DB</i>")]
+    RAY["Ray Cluster<br/><i>Distributed processing</i>"]
+    VLLM["vLLM Endpoint<br/><i>OpenAI-compatible API</i>"]
+  end
+
+  subgraph QUERY["<b>Query Time</b> &mdash; rag_query_test.ipynb"]
+    direction LR
+    Q_EMBED["Embed question"]
+    Q_SEARCH["Search Milvus"]
+    Q_PROMPT["Build RAG prompt"]
+    Q_LLM["Generate answer"]
+    Q_EMBED --> Q_SEARCH --> Q_PROMPT --> Q_LLM
+  end
+
+  PREREQS --> PIPELINE
+  PARSE -->|"chunks"| MINIO
+  PARSE -.->|"distributed"| RAY
+  MINIO -->|"JSONL"| INGEST
+  INGEST -->|"vectors"| MILVUS
+  DOWNLOAD -->|"weights"| PVC
+  DEPLOY --> VLLM
+
+  MILVUS -->|"context"| Q_SEARCH
+  VLLM -->|"completion"| Q_LLM
+
+  classDef prereq fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+  classDef data fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+  classDef model fill:#fff3e0,stroke:#e65100,color:#bf360c
+  classDef external fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+  classDef query fill:#fce4ec,stroke:#c62828,color:#b71c1c
+  classDef conditional fill:#fff9c4,stroke:#f9a825,color:#f57f17
+
+  class S3_SECRET,PVC,RBAC prereq
+  class PARSE,INGEST data
+  class DOWNLOAD,DEPLOY model
+  class MINIO,MILVUS,RAY,VLLM external
+  class Q_EMBED,Q_SEARCH,Q_PROMPT,Q_LLM query
+  class EMBED_DEPLOY conditional
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'default',
+    flowchart: {
+      useMaxWidth: true,
+      htmlLabels: true,
+      curve: 'basis'
+    }
+  });
+</script>
+</body>
+</html>

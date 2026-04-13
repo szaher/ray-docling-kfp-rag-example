@@ -63,8 +63,10 @@ def rag_multistep_pipeline(
     # Embedding
     deploy_embedding: bool = False,  # If True, deploys embedding model as InferenceService
     embedding_endpoint: str = "",  # If empty, uses local model; else uses deployed service
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
-    embedding_dim: int = 384,
+    embedding_model: str = "ibm-granite/granite-embedding-125m-english",
+    embedding_dim: int = 768,
+    embedding_runtime_image: str = "registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a",
+    embedding_gpu_count: int = 1,
     # Milvus
     milvus_host: str = "milvus-milvus.milvus.svc.cluster.local",
     milvus_port: int = 19530,
@@ -122,6 +124,8 @@ def rag_multistep_pipeline(
         embed_deploy_task = deploy_embedding_model(
             model_name=embedding_model,
             namespace=namespace,
+            runtime_image=embedding_runtime_image,
+            gpu_count=embedding_gpu_count,
         )
         embed_deploy_task.after(chunk_task)
 

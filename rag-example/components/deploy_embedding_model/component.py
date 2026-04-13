@@ -1,7 +1,8 @@
 """KFP component: Deploy a text embedding model on OpenShift AI.
 
-Creates a KServe InferenceService with a TEI-compatible ServingRuntime
-for serving embedding requests via an OpenAI-compatible API.
+Creates a KServe InferenceService with a vLLM-based ServingRuntime
+(``--task embedding``) for serving embedding requests via an
+OpenAI-compatible ``/v1/embeddings`` API.
 
 Uses in-cluster Kubernetes config (service account token) — no
 explicit API URL or token required.
@@ -18,25 +19,34 @@ def deploy_embedding_model(
     model_name: str,
     namespace: str,
     serving_runtime_name: str = "embedding-runtime",
+    runtime_image: str = "registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:094db84a1da5e8a575d0c9eade114fa30f4a2061064a338e3e032f3578f8082a",
     min_replicas: int = 1,
     max_replicas: int = 1,
     cpu_requests: str = "2",
     cpu_limits: str = "4",
     memory_requests: str = "4Gi",
     memory_limits: str = "8Gi",
+    gpu_count: int = 1,
+    max_model_len: int = 512,
 ) -> str:
     """Deploy a text embedding model using KServe InferenceService.
 
+    Uses vLLM with ``--task embedding`` on GPU to serve an
+    OpenAI-compatible ``/v1/embeddings`` endpoint.
+
     Args:
-        model_name: HuggingFace model ID (e.g. 'sentence-transformers/all-MiniLM-L6-v2').
+        model_name: HuggingFace model ID (e.g. 'ibm-granite/granite-embedding-125m-english').
         namespace: Namespace to deploy the InferenceService.
         serving_runtime_name: Name of the embedding ServingRuntime CR.
+        runtime_image: Container image for the vLLM embedding server.
         min_replicas: Minimum number of replicas.
         max_replicas: Maximum number of replicas.
         cpu_requests: CPU requests per replica.
         cpu_limits: CPU limits per replica.
         memory_requests: Memory requests per replica.
         memory_limits: Memory limits per replica.
+        gpu_count: Number of GPUs per replica.
+        max_model_len: Maximum sequence length for the embedding model.
 
     Returns:
         The embedding service endpoint URL.
@@ -53,6 +63,10 @@ def deploy_embedding_model(
     isvc_name = model_name.split("/")[-1].lower().replace("_", "-").replace(".", "-")
 
     # --- Create or update ServingRuntime ---
+    gpu_resources = {}
+    if gpu_count > 0:
+        gpu_resources = {"nvidia.com/gpu": str(gpu_count)}
+
     serving_runtime = {
         "apiVersion": "serving.kserve.io/v1alpha1",
         "kind": "ServingRuntime",
@@ -63,19 +77,35 @@ def deploy_embedding_model(
         "spec": {
             "containers": [{
                 "name": "kserve-container",
-                "image": "ghcr.io/huggingface/text-embeddings-inference:latest",
+                "image": runtime_image,
                 "args": [
-                    "--model-id", model_name,
+                    "--model", model_name,
+                    "--task", "embedding",
                     "--port", "8080",
-                    "--max-batch-tokens", "8192",
+                    "--dtype", "float16",
+                    "--max-model-len", str(max_model_len),
+                ],
+                "env": [
+                    {"name": "HF_HOME", "value": "/tmp/hf_home"},
+                    {"name": "HUGGINGFACE_HUB_CACHE", "value": "/tmp/hf_home"},
+                    {"name": "HF_HUB_OFFLINE", "value": "0"},
+                    {"name": "TRANSFORMERS_OFFLINE", "value": "0"},
                 ],
                 "ports": [{"containerPort": 8080, "protocol": "TCP"}],
                 "resources": {
-                    "requests": {"cpu": cpu_requests, "memory": memory_requests},
-                    "limits": {"cpu": cpu_limits, "memory": memory_limits},
+                    "requests": {
+                        "cpu": cpu_requests,
+                        "memory": memory_requests,
+                        **gpu_resources,
+                    },
+                    "limits": {
+                        "cpu": cpu_limits,
+                        "memory": memory_limits,
+                        **gpu_resources,
+                    },
                 },
             }],
-            "supportedModelFormats": [{"name": "huggingface", "version": "1"}],
+            "supportedModelFormats": [{"name": "vLLM", "version": "1"}],
         },
     }
 
@@ -118,16 +148,18 @@ def deploy_embedding_model(
                 "minReplicas": min_replicas,
                 "maxReplicas": max_replicas,
                 "model": {
-                    "modelFormat": {"name": "huggingface"},
+                    "modelFormat": {"name": "vLLM"},
                     "runtime": serving_runtime_name,
                     "resources": {
                         "requests": {
                             "cpu": cpu_requests,
                             "memory": memory_requests,
+                            **gpu_resources,
                         },
                         "limits": {
                             "cpu": cpu_limits,
                             "memory": memory_limits,
+                            **gpu_resources,
                         },
                     },
                 },
